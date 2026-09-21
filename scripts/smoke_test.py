@@ -1,0 +1,48 @@
+"""Offline smoke test — no Discord token needed.
+
+Exercises DB init, model creation, no-repeat selection, and leveling math.
+"""
+
+import asyncio
+import os
+import tempfile
+
+os.environ.setdefault("POKESKETCH_DISCORD_TOKEN", "dummy-not-used")
+
+
+async def main() -> None:
+    from pokesketch import db, leveling
+    from pokesketch.selection import pick_dex_no
+
+    tmp = tempfile.mkdtemp()
+    db.init_engine(os.path.join(tmp, "test.db"))
+    await db.create_all()
+
+    # Seed a guild config.
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=1, dex_min=1, dex_max=5, selection_mode="no_repeat"))
+        await s.commit()
+
+    # No-repeat: 5 picks should exhaust the pool exactly, no repeats.
+    picks = [await pick_dex_no(1, 1, 5, "no_repeat") for _ in range(5)]
+    assert sorted(picks) == [1, 2, 3, 4, 5], f"expected full pool, got {picks}"
+    # 6th pick triggers a reset and returns a valid number again.
+    sixth = await pick_dex_no(1, 1, 5, "no_repeat")
+    assert 1 <= sixth <= 5, sixth
+    print(f"selection OK: first cycle={picks}, after-reset={sixth}")
+
+    # Leveling curve sanity.
+    assert leveling.level_for_exp(0) == 1
+    assert leveling.level_for_exp(50) == 2
+    assert leveling.level_for_exp(150) == 3
+    assert leveling.streak_bonus(100) == leveling.EXP_STREAK_CAP
+    lvl, into, need = leveling.exp_into_level(75)
+    assert lvl == 2 and into == 25 and need == 100, (lvl, into, need)
+    print(f"leveling OK: lvl(75)={lvl}, into={into}, need={need}")
+
+    await db.dispose()
+    print("ALL SMOKE TESTS PASSED")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

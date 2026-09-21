@@ -1,0 +1,29 @@
+[Unit]
+Description=PokeSketch Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pokesketch
+Group=pokesketch
+WorkingDirectory=/opt/pokesketch
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/pokesketch/.env
+ExecStart=/opt/pokesketch/.venv/bin/python -m pokesketch
+Restart=on-failure
+RestartSec=10
+
+# Hardening (outbound-only bot; no inbound, no privileged files)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/pokesketch/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
