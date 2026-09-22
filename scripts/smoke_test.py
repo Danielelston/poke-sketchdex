@@ -40,6 +40,42 @@ async def main() -> None:
     assert lvl == 2 and into == 25 and need == 100, (lvl, into, need)
     print(f"leveling OK: lvl(75)={lvl}, into={into}, need={need}")
 
+    # Global EXP: award to the same user across two guilds and check global sums
+    # while per-guild rows stay independent.
+    from pokesketch.cogs.submissions import _award_exp
+
+    uid = 999
+    async with db.session() as s:
+        await _award_exp(s, guild_id=1, user_id=uid, kind="submit", amount=10)
+        await _award_exp(s, guild_id=2, user_id=uid, kind="submit", amount=15)
+        await s.commit()
+
+    async with db.session() as s:
+        from sqlalchemy import select
+
+        user_g1 = (
+            await s.execute(
+                select(db.User).where(db.User.guild_id == 1, db.User.user_id == uid)
+            )
+        ).scalar_one()
+        user_g2 = (
+            await s.execute(
+                select(db.User).where(db.User.guild_id == 2, db.User.user_id == uid)
+            )
+        ).scalar_one()
+        global_user = (
+            await s.execute(select(db.GlobalUser).where(db.GlobalUser.user_id == uid))
+        ).scalar_one()
+
+    assert user_g1.exp == 10, user_g1.exp
+    assert user_g2.exp == 15, user_g2.exp
+    assert global_user.exp == 25, global_user.exp
+    assert global_user.exp == user_g1.exp + user_g2.exp
+    print(
+        f"global exp OK: guild1={user_g1.exp}, guild2={user_g2.exp}, "
+        f"global={global_user.exp}"
+    )
+
     await db.dispose()
     print("ALL SMOKE TESTS PASSED")
 
