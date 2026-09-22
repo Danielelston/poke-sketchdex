@@ -59,6 +59,13 @@ class Help(commands.Cog):
                 "`/profile [user]` — your (or someone's) level, EXP, and streaks\n"
                 "`/leaderboard` — top sketchers in this server by EXP\n"
                 "`/streak` / `/stats` — server-wide streak and totals\n"
+                "`/pokebox [user]` — dex completion tracker (free, automatic on `/submit`)\n"
+                "`/catch` — spend a pokeball to catch today's just-submitted sketch\n"
+                "`/party [user]` — your 6 active party slots\n"
+                "`/box [user]` — paginated view of your storage box\n"
+                "`/swap <box_slot> <active_slot>` — swap a boxed mon into your active party\n"
+                "`/release <slot> [active]` — release a caught mon and free its slot\n"
+                "`/pokeballs [user]` — your pokeball balance and next weekly grant\n"
                 "`/help` — this message"
             ),
             inline=False,
