@@ -1,5 +1,5 @@
 [Unit]
-Description=PokeSketch Discord bot
+Description=PokeSketchDex Discord bot
 After=network-online.target
 Wants=network-online.target
 

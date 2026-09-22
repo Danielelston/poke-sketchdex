@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Provision PokeSketch inside a fresh Debian 12 LXC (run as root in the container).
+# Provision PokeSketchDex inside a fresh Debian 12 LXC (run as root in the container).
 # Idempotent-ish: safe to re-run to update code + restart.
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/Danielelston/pokesketch.git}"
+REPO_URL="${REPO_URL:-https://github.com/Danielelston/poke-sketchdex.git}"
 APP_DIR="/opt/pokesketch"
 SVC_USER="pokesketch"
 

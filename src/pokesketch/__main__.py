@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from .bot import PokeSketchBot
+from .bot import PokeSketchDexBot
 from .config import Config
 
 
@@ -14,7 +14,7 @@ def main() -> None:
         level=getattr(logging, config.log_level, logging.INFO),
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
-    bot = PokeSketchBot(config)
+    bot = PokeSketchDexBot(config)
     bot.run(config.discord_token, log_handler=None)
 
 

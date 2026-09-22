@@ -16,7 +16,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 POKEAPI_BASE = "https://pokeapi.co/api/v2"
-USER_AGENT = "PokeSketch-Bot/0.1 (+https://github.com/Danielelston/pokesketch)"
+USER_AGENT = "PokeSketchDex-Bot/0.1 (+https://github.com/Danielelston/poke-sketchdex)"
 
 
 @dataclass

@@ -1,7 +1,7 @@
 [project]
 name = "pokesketch"
 version = "0.1.0"
-description = "Self-hosted Discord bot that posts a daily Pokemon sketch challenge and gamifies contributions."
+description = "Self-hosted Discord bot that posts a daily Pokemon sketch challenge (PokeSketchDex) and gamifies contributions."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

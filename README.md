@@ -1,10 +1,10 @@
-# PokeSketch
+# PokeSketchDex
 
 A self-hosted Discord bot that posts a **daily Pokémon sketch challenge** — pings a role, shows 1–2 reference images from [PokéAPI](https://pokeapi.co/), opens a thread for submissions, and gamifies contributions with EXP, levels, streaks, and upvotes.
 
 Multi-guild by design; runs comfortably on a tiny LXC on Proxmox.
 
-Full design doc lives in the author's Obsidian vault (`Areas/Homelab/Proxmox/PokeSketch Bot Plan.md`).
+Full design doc lives in the author's Obsidian vault (`Areas/Homelab/Projects/PokeSketch Bot Plan.md`).
 
 ## Features (v1)
 
@@ -33,8 +33,8 @@ Full design doc lives in the author's Obsidian vault (`Areas/Homelab/Proxmox/Pok
 ## Quick start (local dev)
 
 ```bash
-git clone https://github.com/Danielelston/pokesketch.git
-cd pokesketch
+git clone https://github.com/Danielelston/poke-sketchdex.git
+cd poke-sketchdex
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e .
 cp .env.example .env       # then paste your bot token into .env

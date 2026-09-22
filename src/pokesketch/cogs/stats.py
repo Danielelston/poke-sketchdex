@@ -47,7 +47,7 @@ class Stats(commands.Cog):
         bar_len = 12
         filled = 0 if need == 0 else int(bar_len * into / need)
         bar = "█" * filled + "░" * (bar_len - filled)
-        embed = discord.Embed(title=f"{target.display_name}'s PokeSketch profile", color=0x5865F2)
+        embed = discord.Embed(title=f"{target.display_name}'s PokeSketchDex profile", color=0x5865F2)
         embed.add_field(name="Level", value=str(lvl))
         embed.add_field(name="EXP", value=f"{row.exp} total")
         embed.add_field(name="Progress", value=f"`{bar}` {into}/{need}")
@@ -78,7 +78,7 @@ class Stats(commands.Cog):
             lvl = leveling.level_for_exp(r.exp)
             lines.append(f"{medals[i]} <@{r.user_id}> — Lv{lvl} · {r.exp} EXP · {r.personal_streak}🔥")
         embed = discord.Embed(
-            title="🏆 PokeSketch Leaderboard",
+            title="🏆 PokeSketchDex Leaderboard",
             description="\n".join(lines),
             color=0xF1C40F,
         )

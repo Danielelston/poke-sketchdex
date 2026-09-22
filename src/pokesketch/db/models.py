@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models for PokeSketch.
+"""SQLAlchemy ORM models for PokeSketchDex.
 
 Multi-guild by design: every row that is guild-scoped carries ``guild_id`` so a
 single bot instance can serve many servers with isolated config and data.
