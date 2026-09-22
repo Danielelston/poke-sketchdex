@@ -14,6 +14,11 @@ def _exp_field_value() -> str:
 
     Sourced directly from `leveling.py` so this never drifts out of sync
     with the actual award logic in `cogs/submissions.py`.
+
+    Maintenance: when adding/renaming/removing a slash command, or when
+    tuning EXP rules in `leveling.py`, also update the command-list text
+    below (player/admin sections) and this EXP explainer — see the
+    "Maintenance rule" callout in the Obsidian Bot Plan doc.
     """
     return (
         f"• **Submit a sketch:** +{leveling.EXP_SUBMIT} EXP (once per day, per daily thread)\n"
