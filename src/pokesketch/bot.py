@@ -1,4 +1,4 @@
-"""PokeSketch bot: client, scheduler wiring, and extension loading."""
+"""PokeSketchDex bot: client, scheduler wiring, and extension loading."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ INITIAL_EXTENSIONS = [
 ]
 
 
-class PokeSketchBot(commands.Bot):
+class PokeSketchDexBot(commands.Bot):
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.default()
         intents.members = True  # for role assignment / member lookups
