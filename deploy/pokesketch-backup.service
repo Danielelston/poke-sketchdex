@@ -1,0 +1,8 @@
+[Unit]
+Description=PokeSketchDex nightly DB backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/pokesketch/deploy/backup-db.sh
