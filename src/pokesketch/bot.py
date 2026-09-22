@@ -35,6 +35,7 @@ class PokeSketchDexBot(commands.Bot):
         self.config = config
         self.api = PokeApiClient(config.image_cache_dir)
         self.scheduler = AsyncIOScheduler()
+        self._commands_synced = False
 
     async def setup_hook(self) -> None:
         db.init_engine(self.config.db_path)
@@ -43,19 +44,31 @@ class PokeSketchDexBot(commands.Bot):
             await self.load_extension(ext)
             log.info("Loaded extension %s", ext)
 
-        # Sync slash commands: instantly to dev guilds, else globally.
-        if self.config.dev_guild_ids:
-            for gid in self.config.dev_guild_ids:
-                guild = discord.Object(id=gid)
-                self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
-                log.info("Synced commands to dev guild %s", gid)
-        else:
-            await self.tree.sync()
-            log.info("Synced global commands (may take up to ~1h to appear).")
+        # Slash commands are synced per-guild once we're actually connected
+        # and self.guilds is populated — see on_ready / _sync_all_joined_guilds.
+        # setup_hook runs before the gateway connects, so self.guilds is
+        # empty here and any sync attempted now would be a no-op.
 
         await self._schedule_all_guilds()
         self.scheduler.start()
+
+    async def _sync_all_joined_guilds(self) -> None:
+        """Sync slash commands guild-scoped only, to every guild we're in.
+
+        We deliberately never register commands globally: mixing global +
+        guild-scoped copies is what caused duplicate slash commands to show
+        up client-side in a guild (both registrations render as separate
+        entries). Global commands are cleared defensively in case any are
+        left over from a previous run/deploy.
+        """
+        self.tree.clear_commands(guild=None)
+        await self.tree.sync()  # pushes the (now empty) global command set
+        log.info("Cleared any global command registrations.")
+        for guild in self.guilds:
+            target = discord.Object(id=guild.id)
+            self.tree.copy_global_to(guild=target)
+            await self.tree.sync(guild=target)
+            log.info("Synced commands to guild %s (%s)", guild.id, guild.name)
 
     async def _schedule_all_guilds(self) -> None:
         async with db.session() as s:
@@ -99,6 +112,16 @@ class PokeSketchDexBot(commands.Bot):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, getattr(self.user, "id", "?"))
+        if not self._commands_synced:
+            await self._sync_all_joined_guilds()
+            self._commands_synced = True
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        """Sync commands to a newly-joined guild immediately."""
+        target = discord.Object(id=guild.id)
+        self.tree.copy_global_to(guild=target)
+        await self.tree.sync(guild=target)
+        log.info("Synced commands to newly joined guild %s (%s)", guild.id, guild.name)
 
     async def close(self) -> None:
         if self.scheduler.running:
