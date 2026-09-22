@@ -61,6 +61,7 @@ class Help(commands.Cog):
                 "`/streak` / `/stats` — server-wide streak and totals\n"
                 "`/pokebox [user]` — dex completion tracker (free, automatic on `/submit`)\n"
                 "`/catch` — spend a pokeball to catch today's just-submitted sketch\n"
+                "-# Caught images are stored downsized (max 1080x1080px) to keep storage bounded\n"
                 "`/party [user]` — your 6 active party slots\n"
                 "`/box [user]` — paginated view of your storage box\n"
                 "`/swap <box_slot> <active_slot>` — swap a boxed mon into your active party\n"
