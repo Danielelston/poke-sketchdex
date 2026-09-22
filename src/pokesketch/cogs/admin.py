@@ -13,6 +13,8 @@ from discord.ext import commands
 
 from .. import db
 from ..daily import post_daily_for_guild
+from ..selection import clear_used_pool
+from ..ui import ConfirmView
 
 log = logging.getLogger(__name__)
 
@@ -155,6 +157,33 @@ class Admin(commands.Cog):
         await interaction.followup.send(
             "✅ Posted." if posted else "Already posted today (or paused / no channel).",
             ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="reset-pool",
+        description="Manually reset the no-repeat selection pool for this server.",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def reset_pool(self, interaction: discord.Interaction) -> None:
+        view = ConfirmView(author_id=interaction.user.id)
+        await interaction.response.send_message(
+            "⚠️ This will clear this server's no-repeat pool history — previously "
+            "featured Pokémon may be picked again. This does **not** affect EXP, "
+            "levels, or any player progress. Continue?",
+            view=view,
+            ephemeral=True,
+        )
+        view.interaction = interaction
+        await view.wait()
+        if not view.confirmed:
+            return
+        count = await clear_used_pool(interaction.guild_id)
+        await interaction.edit_original_response(
+            content=(
+                f"✅ Cleared {count} Pokémon from the no-repeat pool. "
+                "The cycle starts fresh from the next daily post."
+            ),
+            view=None,
         )
 
 

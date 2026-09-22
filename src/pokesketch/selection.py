@@ -5,12 +5,29 @@ from __future__ import annotations
 import logging
 import random
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from .db import UsedPokemon
 from .db import session as db_session
 
 log = logging.getLogger(__name__)
+
+
+async def clear_used_pool(guild_id: int) -> int:
+    """Manually clear a guild's no-repeat pool (`UsedPokemon` rows).
+
+    Mirrors the exhaustion-triggered reset in `pick_dex_no`, but invoked
+    on demand (e.g. from `/admin reset-pool`) rather than only when the
+    pool runs out. Returns the number of rows cleared.
+    """
+    async with db_session() as s:
+        count = (
+            await s.execute(select(func.count()).select_from(UsedPokemon).where(UsedPokemon.guild_id == guild_id))
+        ).scalar_one()
+        await s.execute(delete(UsedPokemon).where(UsedPokemon.guild_id == guild_id))
+        await s.commit()
+        log.info("Guild %s manually cleared no-repeat pool (%d rows).", guild_id, count)
+        return count
 
 
 async def pick_dex_no(guild_id: int, dex_min: int, dex_max: int, mode: str) -> int:

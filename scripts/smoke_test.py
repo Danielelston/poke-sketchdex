@@ -31,6 +31,32 @@ async def main() -> None:
     assert 1 <= sixth <= 5, sixth
     print(f"selection OK: first cycle={picks}, after-reset={sixth}")
 
+    # Manual pool reset (/admin reset-pool): seed rows for a guild, clear
+    # them, and confirm a previously-used dex number can be reselected.
+    from pokesketch.selection import clear_used_pool
+
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=42, dex_min=1, dex_max=2, selection_mode="no_repeat"))
+        await s.commit()
+    first, second = (
+        await pick_dex_no(42, 1, 2, "no_repeat"),
+        await pick_dex_no(42, 1, 2, "no_repeat"),
+    )
+    assert sorted([first, second]) == [1, 2], (first, second)
+    cleared = await clear_used_pool(42)
+    assert cleared == 2, cleared
+    reselect = await pick_dex_no(42, 1, 2, "no_repeat")
+    assert reselect in (1, 2), reselect
+    # Pool was cleared, so both numbers are available again post-reset.
+    async with db.session() as s:
+        from sqlalchemy import select as _select
+
+        remaining_rows = (
+            await s.execute(_select(db.UsedPokemon).where(db.UsedPokemon.guild_id == 42))
+        ).scalars().all()
+    assert len(remaining_rows) == 1, remaining_rows  # only the fresh pick after clearing
+    print(f"reset-pool OK: seeded={sorted([first, second])}, cleared={cleared}, reselect={reselect}")
+
     # Leveling curve sanity.
     assert leveling.level_for_exp(0) == 1
     assert leveling.level_for_exp(50) == 2
