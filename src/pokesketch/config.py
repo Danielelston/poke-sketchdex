@@ -27,6 +27,7 @@ class Config:
     dev_guild_ids: list[int] = field(default_factory=list)
     db_path: str = "data/pokesketch.db"
     image_cache_dir: str = "data/images_cache"
+    party_cache_dir: str = "data/party_cache"
     log_level: str = "INFO"
 
     @classmethod
@@ -43,6 +44,9 @@ class Config:
             db_path=os.getenv("POKESKETCH_DB_PATH", "data/pokesketch.db").strip(),
             image_cache_dir=os.getenv(
                 "POKESKETCH_IMAGE_CACHE_DIR", "data/images_cache"
+            ).strip(),
+            party_cache_dir=os.getenv(
+                "POKESKETCH_PARTY_CACHE_DIR", "data/party_cache"
             ).strip(),
             log_level=os.getenv("POKESKETCH_LOG_LEVEL", "INFO").strip().upper(),
         )

@@ -102,6 +102,126 @@ async def main() -> None:
         f"global={global_user.exp}"
     )
 
+    # --- PokeBox, Party & Pokeballs ---
+    from datetime import date as _date
+
+    from pokesketch import pokebox
+
+    # PokeBox: free tracker, insert-if-not-exists is idempotent.
+    async with db.session() as s:
+        s.add(db.DailyPokemon(guild_id=1, local_date=_date.today(), dex_no=7, name="squirtle"))
+        await s.commit()
+        daily = (
+            await s.execute(select(db.DailyPokemon).where(db.DailyPokemon.dex_no == 7))
+        ).scalar_one()
+        pb_uid = 5001
+        sub = db.Submission(
+            guild_id=1, user_id=pb_uid, daily_id=daily.id, image_url="https://example.invalid/x.png"
+        )
+        s.add(sub)
+        await s.flush()
+        await pokebox.record_pokebox_catch(s, pb_uid, daily.dex_no, sub.id)
+        await pokebox.record_pokebox_catch(s, pb_uid, daily.dex_no, sub.id)  # idempotent
+        wallet = await pokebox.get_or_create_wallet(s, pb_uid)
+        wallet.balance = 25
+        await s.commit()
+
+    async with db.session() as s:
+        caught, total = await pokebox.pokebox_progress(s, pb_uid)
+    assert caught == 1, caught
+    assert total == pokebox.TOTAL_DEX
+    print(f"pokebox OK: caught={caught}/{total} (double-insert stayed idempotent)")
+
+    # /catch offline: stub the network image download so the smoke test stays offline.
+    party_dir = os.path.join(tmp, "party_cache")
+
+    async def _fake_cache_image(url, user_id, caughtmon_id, cache_dir):
+        user_dir = os.path.join(cache_dir, str(user_id))
+        os.makedirs(user_dir, exist_ok=True)
+        path = os.path.join(user_dir, f"{caughtmon_id}.png")
+        with open(path, "wb") as fh:
+            fh.write(b"fake-image-bytes")
+        return path
+
+    pokebox._cache_image = _fake_cache_image
+
+    # Catch 20 mons off the same today's submission: first 6 land active,
+    # the rest fall back to storage, exactly matching the 6/20 cap.
+    caught_mons = []
+    for _ in range(20):
+        async with db.session() as s:
+            mon = await pokebox.catch_todays_submission(s, pb_uid, party_dir)
+            await s.commit()
+            caught_mons.append(mon)
+
+    actives = [m for m in caught_mons if m.is_active]
+    boxed = [m for m in caught_mons if not m.is_active]
+    assert len(actives) == pokebox.MAX_ACTIVE, len(actives)
+    assert len(boxed) == pokebox.MAX_TOTAL - pokebox.MAX_ACTIVE, len(boxed)
+    assert sorted(m.slot for m in actives) == list(range(1, pokebox.MAX_ACTIVE + 1))
+    assert sorted(m.slot for m in boxed) == list(range(1, pokebox.MAX_TOTAL - pokebox.MAX_ACTIVE + 1))
+    print(f"catch placement OK: {len(actives)} active, {len(boxed)} boxed (auto-active then storage fallback)")
+
+    # 21st catch: storage is full (20/20) -> clean CatchError, not a crash.
+    try:
+        async with db.session() as s:
+            await pokebox.catch_todays_submission(s, pb_uid, party_dir)
+            await s.commit()
+        raise AssertionError("expected CatchError for full storage")
+    except pokebox.CatchError as exc:
+        assert "Storage full" in str(exc), exc
+    print("catch cap OK: 21st catch rejected cleanly")
+
+    # No pokeballs left -> clean CatchError.
+    empty_uid = 5002
+    async with db.session() as s:
+        s.add(db.DailyPokemon(guild_id=2, local_date=_date.today(), dex_no=8, name="wartortle"))
+        await s.commit()
+        daily2 = (
+            await s.execute(select(db.DailyPokemon).where(db.DailyPokemon.dex_no == 8))
+        ).scalar_one()
+        s.add(
+            db.Submission(
+                guild_id=2, user_id=empty_uid, daily_id=daily2.id, image_url="https://example.invalid/y.png"
+            )
+        )
+        await s.commit()
+    try:
+        async with db.session() as s:
+            await pokebox.catch_todays_submission(s, empty_uid, party_dir)
+            await s.commit()
+        raise AssertionError("expected CatchError for no pokeballs")
+    except pokebox.CatchError as exc:
+        assert "No pokeballs" in str(exc), exc
+    print("catch OK: no-pokeballs error is clean")
+
+    # /swap: promote a boxed mon into an active slot, demoting the incumbent to storage.
+    async with db.session() as s:
+        promoted, demoted = await pokebox.swap_mon(s, pb_uid, box_slot=1, active_slot=1)
+        promoted_id, demoted_id = promoted.id, (demoted.id if demoted else None)
+        await s.commit()
+    async with db.session() as s:
+        party = await pokebox.party_listing(s, pb_uid)
+        box = await pokebox.box_listing(s, pb_uid)
+    assert any(m.id == promoted_id and m.slot == 1 for m in party), party
+    assert demoted_id is not None and any(m.id == demoted_id for m in box), box
+    print("swap OK: promoted mon active in slot 1, demoted mon back in storage")
+
+    # /release: deletes the CaughtMon row AND its cached file from disk (no relying on later GC).
+    async with db.session() as s:
+        box = await pokebox.box_listing(s, pb_uid)
+    target = box[0]
+    assert os.path.exists(target.cached_image_path), target.cached_image_path
+    async with db.session() as s:
+        released_path = await pokebox.release_mon(s, pb_uid, target.slot, is_active=False)
+        await s.commit()
+    pokebox.delete_cached_file(released_path)
+    assert not os.path.exists(released_path), released_path
+    async with db.session() as s:
+        remaining_total = await pokebox.total_caught_count(s, pb_uid)
+    assert remaining_total == 19, remaining_total
+    print("release OK: DB row and cached file both removed")
+
     await db.dispose()
 
     # /help: EXP explainer should always reflect the live leveling constants

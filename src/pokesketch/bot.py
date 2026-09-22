@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from discord.ext import commands
 from sqlalchemy import select
 
-from . import db
+from . import db, pokebox
 from .config import Config
 from .daily import post_daily_for_guild
 from .pokeapi import PokeApiClient
@@ -22,9 +22,12 @@ log = logging.getLogger(__name__)
 INITIAL_EXTENSIONS = [
     "pokesketch.cogs.admin",
     "pokesketch.cogs.submissions",
+    "pokesketch.cogs.collection",
     "pokesketch.cogs.stats",
     "pokesketch.cogs.help",
 ]
+
+WEEKLY_POKEBALL_JOB_ID = "weekly-pokeball-grant"
 
 
 class PokeSketchDexBot(commands.Bot):
@@ -51,6 +54,7 @@ class PokeSketchDexBot(commands.Bot):
         # empty here and any sync attempted now would be a no-op.
 
         await self._schedule_all_guilds()
+        self._schedule_weekly_pokeball_grant()
         self.scheduler.start()
 
     async def _sync_all_joined_guilds(self) -> None:
@@ -112,6 +116,26 @@ class PokeSketchDexBot(commands.Bot):
             await post_daily_for_guild(self, self.api, guild_id, local_date)
         except Exception:  # noqa: BLE001 - never let a job kill the scheduler
             log.exception("Daily job failed for guild %s", guild_id)
+
+    def _schedule_weekly_pokeball_grant(self) -> None:
+        """Global (not per-guild) weekly pokeball grant — runs once regardless of guild count."""
+        self.scheduler.add_job(
+            self._run_weekly_pokeball_job,
+            CronTrigger(day_of_week="mon", hour=0, minute=0, timezone=ZoneInfo("UTC")),
+            id=WEEKLY_POKEBALL_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        log.info("Scheduled weekly pokeball grant (Monday 00:00 UTC).")
+
+    async def _run_weekly_pokeball_job(self) -> None:
+        try:
+            async with db.session() as s:
+                granted = await pokebox.grant_weekly_pokeballs(s)
+                await s.commit()
+            log.info("Weekly pokeball grant: %d users granted.", granted)
+        except Exception:  # noqa: BLE001 - never let a job kill the scheduler
+            log.exception("Weekly pokeball grant job failed")
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, getattr(self.user, "id", "?"))

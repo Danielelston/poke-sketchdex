@@ -192,3 +192,61 @@ class UsedPokemon(Base):
     guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
     dex_no: Mapped[int] = mapped_column(Integer)
     used_on: Mapped[date] = mapped_column(Date, default=lambda: datetime.now(UTC).date())
+
+
+class PokeBox(Base):
+    """Free, unlimited, global dex-completion tracker: has this user ever caught this dex_no.
+
+    Populated automatically inside /submit (insert-if-not-exists), no pokeball
+    cost, no image copy — just points at the submission that caught it.
+    """
+
+    __tablename__ = "pokebox"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    dex_no: Mapped[int] = mapped_column(Integer, primary_key=True)
+    first_caught_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    submission_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("submissions.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class PokeballWallet(Base):
+    """Global pokeball balance, one per Discord user, shared across every guild."""
+
+    __tablename__ = "pokeball_wallets"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    balance: Mapped[int] = mapped_column(Integer, default=0)
+    # ISO week the last weekly grant landed, e.g. "2026-W39" — idempotency guard
+    # so a mid-week restart doesn't double-grant.
+    last_granted_week: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
+
+class CaughtMon(Base):
+    """A caught sketch image, global, capped at 20 total per user / 6 active.
+
+    Active party (is_active=True) uses slot 1-6; storage box (is_active=False)
+    uses a separate 1-20 box index. Both caps are enforced at write time, not
+    by a DB constraint (SQLite has no worthwhile partial-unique support here).
+    No uniqueness on (user_id, dex_no) — duplicate species are allowed.
+    """
+
+    __tablename__ = "caught_mons"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+    slot: Mapped[int] = mapped_column(Integer)
+    dex_no: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(64))
+    is_shiny: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Local file path on disk (data/party_cache/{user_id}/{id}.png), NOT a Discord URL.
+    cached_image_path: Mapped[str] = mapped_column(String(1024))
+    caught_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    source_submission_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("submissions.id", ondelete="SET NULL"), nullable=True
+    )
+    # Reserved for the deferred leveling stretch phase — unused, left at defaults.
+    mon_exp: Mapped[int] = mapped_column(Integer, default=0)
+    mon_level: Mapped[int] = mapped_column(Integer, default=1)

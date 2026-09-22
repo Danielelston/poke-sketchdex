@@ -16,7 +16,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import func, select
 
-from .. import db, leveling
+from .. import db, leveling, pokebox
 
 log = logging.getLogger(__name__)
 
@@ -116,9 +116,14 @@ class Submissions(commands.Cog):
                     message_id=posted.id, image_url=posted.attachments[0].url,
                 )
                 s.add(sub)
+                await s.flush()  # assign sub.id for the PokeBox pointer below
             else:
                 existing.message_id = posted.id
                 existing.image_url = posted.attachments[0].url
+                sub = existing
+
+            # PokeBox: free, automatic dex-completion tracker (insert-if-not-exists).
+            await pokebox.record_pokebox_catch(s, uid, daily.dex_no, sub.id)
 
             exp_msg = ""
             if first_time:
