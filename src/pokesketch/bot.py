@@ -58,17 +58,19 @@ class PokeSketchDexBot(commands.Bot):
         We deliberately never register commands globally: mixing global +
         guild-scoped copies is what caused duplicate slash commands to show
         up client-side in a guild (both registrations render as separate
-        entries). Global commands are cleared defensively in case any are
-        left over from a previous run/deploy.
+        entries). Copy the global (in-memory) command tree into each guild
+        first, THEN clear the actual global registration on Discord's side —
+        clearing first would leave nothing for copy_global_to() to copy.
         """
-        self.tree.clear_commands(guild=None)
-        await self.tree.sync()  # pushes the (now empty) global command set
-        log.info("Cleared any global command registrations.")
         for guild in self.guilds:
             target = discord.Object(id=guild.id)
             self.tree.copy_global_to(guild=target)
             await self.tree.sync(guild=target)
             log.info("Synced commands to guild %s (%s)", guild.id, guild.name)
+
+        self.tree.clear_commands(guild=None)
+        await self.tree.sync()  # pushes the (now empty) global command set
+        log.info("Cleared any global command registrations.")
 
     async def _schedule_all_guilds(self) -> None:
         async with db.session() as s:
