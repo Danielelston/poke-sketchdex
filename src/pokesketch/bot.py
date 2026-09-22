@@ -23,6 +23,7 @@ INITIAL_EXTENSIONS = [
     "pokesketch.cogs.admin",
     "pokesketch.cogs.submissions",
     "pokesketch.cogs.stats",
+    "pokesketch.cogs.help",
 ]
 
 

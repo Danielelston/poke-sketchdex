@@ -103,6 +103,19 @@ async def main() -> None:
     )
 
     await db.dispose()
+
+    # /help: EXP explainer should always reflect the live leveling constants
+    # (no hardcoded numbers to drift out of sync with the award logic).
+    from pokesketch.cogs.help import _exp_field_value
+
+    exp_text = _exp_field_value()
+    assert f"+{leveling.EXP_SUBMIT} EXP" in exp_text, exp_text
+    assert f"+{leveling.EXP_PER_STREAK_DAY} EXP" in exp_text, exp_text
+    assert f"capped at +{leveling.EXP_STREAK_CAP}" in exp_text, exp_text
+    assert f"+{leveling.EXP_PER_UPVOTE} EXP" in exp_text, exp_text
+    assert f"capped at +{leveling.EXP_UPVOTE_DAILY_CAP}/day" in exp_text, exp_text
+    print("help EXP explainer OK: matches live leveling constants")
+
     print("ALL SMOKE TESTS PASSED")
 
 
