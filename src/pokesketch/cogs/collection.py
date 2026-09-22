@@ -36,13 +36,13 @@ class Collection(commands.Cog):
     async def pokebox_cmd(self, interaction: discord.Interaction, user: discord.User | None = None) -> None:
         target = user or interaction.user
         async with db.session() as s:
-            caught, total = await pokebox.pokebox_progress(s, target.id)
+            scanned, total = await pokebox.pokebox_progress(s, target.id)
             by_gen = await pokebox.pokebox_by_generation(s, target.id)
 
-        pct = (caught / total * 100) if total else 0.0
+        pct = (scanned / total * 100) if total else 0.0
         embed = discord.Embed(
             title=f"📖 {target.display_name}'s PokeBox",
-            description=f"**{caught} / {total} caught ({pct:.1f}%)**",
+            description=f"**{scanned} / {total} scanned ({pct:.1f}%)**",
             color=0x2ECC71,
         )
         gen_lines = [f"{label}: {gc}/{gt}" for label, gc, gt in by_gen]

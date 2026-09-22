@@ -195,17 +195,17 @@ class UsedPokemon(Base):
 
 
 class PokeBox(Base):
-    """Free, unlimited, global dex-completion tracker: has this user ever caught this dex_no.
+    """Free, unlimited, global dex-completion tracker: has this user ever scanned this dex_no.
 
     Populated automatically inside /submit (insert-if-not-exists), no pokeball
-    cost, no image copy — just points at the submission that caught it.
+    cost, no image copy — just points at the submission that scanned it.
     """
 
     __tablename__ = "pokebox"
 
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     dex_no: Mapped[int] = mapped_column(Integer, primary_key=True)
-    first_caught_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    first_scanned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     submission_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("submissions.id", ondelete="SET NULL"), nullable=True
     )

@@ -122,8 +122,9 @@ class Submissions(commands.Cog):
                 existing.image_url = posted.attachments[0].url
                 sub = existing
 
-            # PokeBox: free, automatic dex-completion tracker (insert-if-not-exists).
-            await pokebox.record_pokebox_catch(s, uid, daily.dex_no, sub.id)
+            # PokeBox: every submitted sketch scans that dex number into the player's
+            # Pokédex (free, automatic, insert-if-not-exists).
+            await pokebox.record_pokebox_scan(s, uid, daily.dex_no, sub.id)
 
             exp_msg = ""
             if first_time:

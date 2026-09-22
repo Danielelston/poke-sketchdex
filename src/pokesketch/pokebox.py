@@ -59,30 +59,31 @@ async def get_or_create_wallet(s, user_id: int) -> PokeballWallet:
     return wallet
 
 
-async def record_pokebox_catch(s, user_id: int, dex_no: int, submission_id: int | None) -> None:
-    """Insert-if-not-exists into PokeBox. Free, automatic — called from /submit."""
+async def record_pokebox_scan(s, user_id: int, dex_no: int, submission_id: int | None) -> None:
+    """Insert-if-not-exists into PokeBox. Free, automatic — scans this dex number into the
+    player's Pokédex, called from /submit."""
     existing = await s.get(PokeBox, (user_id, dex_no))
     if existing is None:
         s.add(PokeBox(user_id=user_id, dex_no=dex_no, submission_id=submission_id))
 
 
 async def pokebox_progress(s, user_id: int) -> tuple[int, int]:
-    """Return (caught, total)."""
-    caught = (
+    """Return (scanned, total)."""
+    scanned = (
         await s.execute(select(func.count()).select_from(PokeBox).where(PokeBox.user_id == user_id))
     ).scalar_one()
-    return caught, TOTAL_DEX
+    return scanned, TOTAL_DEX
 
 
 async def pokebox_by_generation(s, user_id: int) -> list[tuple[str, int, int]]:
-    """Return [(label, caught, total)] per generation."""
+    """Return [(label, scanned, total)] per generation."""
     dex_nos = set(
         (await s.execute(select(PokeBox.dex_no).where(PokeBox.user_id == user_id))).scalars().all()
     )
     out = []
     for label, lo, hi in GENERATIONS:
-        caught = sum(1 for d in dex_nos if lo <= d <= hi)
-        out.append((label, caught, hi - lo + 1))
+        scanned = sum(1 for d in dex_nos if lo <= d <= hi)
+        out.append((label, scanned, hi - lo + 1))
     return out
 
 
