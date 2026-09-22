@@ -8,11 +8,14 @@ global (not per-guild). See the design doc for the full spec.
 
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
 import os
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from PIL import Image, ImageOps
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
@@ -23,6 +26,11 @@ log = logging.getLogger(__name__)
 MAX_ACTIVE = 6
 MAX_TOTAL = 20
 TOTAL_DEX = 1025
+
+# Cached party/box images are downsized to fit within this box (aspect
+# preserved, never upscaled) to keep data/party_cache/ bounded regardless
+# of how large the original Discord attachment was.
+MAX_IMAGE_DIMENSION = 1080
 
 # (generation label, dex_min, dex_max) — national dex generation boundaries.
 GENERATIONS = [
@@ -107,9 +115,25 @@ async def _cache_image(url: str, user_id: int, caughtmon_id: int, cache_dir: str
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url)
         resp.raise_for_status()
-    with open(path, "wb") as fh:
-        fh.write(resp.content)
+    await asyncio.to_thread(_normalize_and_save, resp.content, path)
     return path
+
+
+def _normalize_and_save(raw: bytes, path: str, max_dim: int = MAX_IMAGE_DIMENSION) -> None:
+    """Downsize an image to fit within max_dim x max_dim and save as PNG.
+
+    Preserves aspect ratio, never upscales (a smaller original is left as
+    is), and flattens to RGB/RGBA so re-saving as PNG is always safe
+    regardless of the source format. Keeps data/party_cache/ bounded no
+    matter how large the original Discord attachment was.
+    """
+    with Image.open(io.BytesIO(raw)) as img:
+        img = ImageOps.exif_transpose(img) or img
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA" if "A" in img.mode else "RGB")
+        if img.width > max_dim or img.height > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        img.save(path, format="PNG")
 
 
 def delete_cached_file(path: str) -> None:

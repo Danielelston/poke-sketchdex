@@ -4,6 +4,7 @@ Exercises DB init, model creation, no-repeat selection, and leveling math.
 """
 
 import asyncio
+import io
 import os
 import tempfile
 
@@ -221,6 +222,28 @@ async def main() -> None:
         remaining_total = await pokebox.total_caught_count(s, pb_uid)
     assert remaining_total == 19, remaining_total
     print("release OK: DB row and cached file both removed")
+
+    # Image normalization: an oversized image gets downsized to fit within
+    # MAX_IMAGE_DIMENSION (aspect preserved), a smaller one is left alone.
+    from PIL import Image as PILImage
+
+    big = PILImage.new("RGB", (3000, 1500), (255, 0, 0))
+    big_buf = io.BytesIO()
+    big.save(big_buf, format="JPEG")
+    big_path = os.path.join(tmp, "norm_big.png")
+    pokebox._normalize_and_save(big_buf.getvalue(), big_path)
+    with PILImage.open(big_path) as out:
+        assert max(out.size) == pokebox.MAX_IMAGE_DIMENSION, out.size
+        assert out.size[0] / out.size[1] == 2.0, out.size  # aspect preserved
+
+    small = PILImage.new("RGBA", (200, 300), (0, 255, 0, 128))
+    small_buf = io.BytesIO()
+    small.save(small_buf, format="PNG")
+    small_path = os.path.join(tmp, "norm_small.png")
+    pokebox._normalize_and_save(small_buf.getvalue(), small_path)
+    with PILImage.open(small_path) as out:
+        assert out.size == (200, 300), out.size  # not upscaled
+    print(f"image normalization OK: oversized capped at {pokebox.MAX_IMAGE_DIMENSION}px, small left alone")
 
     await db.dispose()
 
