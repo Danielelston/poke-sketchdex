@@ -30,10 +30,20 @@ class Stats(commands.Cog):
                     )
                 )
             ).scalar_one_or_none()
+            global_row = (
+                await s.execute(select(db.GlobalUser).where(db.GlobalUser.user_id == target.id))
+            ).scalar_one_or_none()
             sub_count = (
                 await s.execute(
                     select(func.count(db.Submission.id)).where(
                         db.Submission.guild_id == interaction.guild_id,
+                        db.Submission.user_id == target.id,
+                    )
+                )
+            ).scalar_one()
+            global_sub_count = (
+                await s.execute(
+                    select(func.count(db.Submission.id)).where(
                         db.Submission.user_id == target.id,
                     )
                 )
@@ -43,17 +53,43 @@ class Stats(commands.Cog):
                 f"{target.display_name} hasn't submitted any sketches yet.", ephemeral=True
             )
             return
-        lvl, into, need = leveling.exp_into_level(row.exp)
-        bar_len = 12
-        filled = 0 if need == 0 else int(bar_len * into / need)
-        bar = "█" * filled + "░" * (bar_len - filled)
-        embed = discord.Embed(title=f"{target.display_name}'s PokeSketchDex profile", color=0x5865F2)
-        embed.add_field(name="Level", value=str(lvl))
-        embed.add_field(name="EXP", value=f"{row.exp} total")
-        embed.add_field(name="Progress", value=f"`{bar}` {into}/{need}")
-        embed.add_field(name="Current streak", value=f"{row.personal_streak} 🔥")
-        embed.add_field(name="Longest streak", value=str(row.longest_streak))
-        embed.add_field(name="Sketches", value=str(sub_count))
+
+        def _bar(exp: int) -> tuple[int, int, int, str]:
+            lvl, into, need = leveling.exp_into_level(exp)
+            bar_len = 12
+            filled = 0 if need == 0 else int(bar_len * into / need)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            return lvl, into, need, bar
+
+        lvl, into, need, bar = _bar(row.exp)
+
+        embed = discord.Embed(title=f"🏆 {target.display_name}'s PokeSketchDex Profile", color=0x5865F2)
+        embed.add_field(
+            name="── This Server ──",
+            value=(
+                f"Level {lvl}\n"
+                f"{into} / {need} EXP\n"
+                f"`{bar}`\n"
+                f"🔥 {row.personal_streak}-day streak (server) (best {row.longest_streak})\n"
+                f"{sub_count} sketches here"
+            ),
+            inline=True,
+        )
+
+        if global_row is None:
+            # Shouldn't normally happen post-backfill — brand new user mid-first-submission.
+            global_text = "No global stats yet."
+        else:
+            glvl, ginto, gneed, gbar = _bar(global_row.exp)
+            global_text = (
+                f"Level {glvl}\n"
+                f"{ginto} / {gneed} EXP\n"
+                f"`{gbar}`\n"
+                f"🔥 {global_row.global_streak}-day streak (global) (best {global_row.longest_global_streak})\n"
+                f"{global_sub_count} sketches total"
+            )
+        embed.add_field(name="── Global (All Servers) ──", value=global_text, inline=True)
+
         if isinstance(target, discord.User) and target.display_avatar:
             embed.set_thumbnail(url=target.display_avatar.url)
         await interaction.response.send_message(embed=embed)

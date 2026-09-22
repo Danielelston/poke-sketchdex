@@ -102,6 +102,20 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class GlobalUser(Base):
+    """Cross-server user progression (summed across every guild)."""
+
+    __tablename__ = "global_users"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    exp: Mapped[int] = mapped_column(Integer, default=0)
+    level: Mapped[int] = mapped_column(Integer, default=1)
+    global_streak: Mapped[int] = mapped_column(Integer, default=0)
+    longest_global_streak: Mapped[int] = mapped_column(Integer, default=0)
+    last_submit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class Submission(Base):
     """A sketch submitted by a user for a given daily."""
 

@@ -36,6 +36,17 @@ async def _get_or_create_user(s, guild_id: int, user_id: int) -> db.User:
     return user
 
 
+async def _get_or_create_global_user(s, user_id: int) -> db.GlobalUser:
+    user = (
+        await s.execute(select(db.GlobalUser).where(db.GlobalUser.user_id == user_id))
+    ).scalar_one_or_none()
+    if user is None:
+        user = db.GlobalUser(user_id=user_id)
+        s.add(user)
+        await s.flush()
+    return user
+
+
 async def _award_exp(s, guild_id: int, user_id: int, kind: str, amount: int) -> None:
     if amount == 0:
         return
@@ -43,6 +54,10 @@ async def _award_exp(s, guild_id: int, user_id: int, kind: str, amount: int) -> 
     user = await _get_or_create_user(s, guild_id, user_id)
     user.exp += amount
     user.level = leveling.level_for_exp(user.exp)
+
+    global_user = await _get_or_create_global_user(s, user_id)
+    global_user.exp += amount
+    global_user.level = leveling.level_for_exp(global_user.exp)
 
 
 class Submissions(commands.Cog):
@@ -113,6 +128,8 @@ class Submissions(commands.Cog):
                 bonus = self._update_streak(user, daily.local_date)
                 if bonus:
                     await _award_exp(s, gid, uid, "streak", bonus)
+                global_user = await _get_or_create_global_user(s, uid)
+                self._update_global_streak(global_user, daily.local_date)
                 await self._update_guild_stats(s, gid, daily.local_date)
                 total = leveling.EXP_SUBMIT + bonus
                 exp_msg = f" (+{total} EXP)"
@@ -137,6 +154,20 @@ class Submissions(commands.Cog):
         user.last_submit_date = submit_date
         user.longest_streak = max(user.longest_streak, user.personal_streak)
         return leveling.streak_bonus(user.personal_streak)
+
+    @staticmethod
+    def _update_global_streak(user: db.GlobalUser, submit_date: date) -> int:
+        """Advance the cross-server streak ("any guild" counts). No bonus EXP — stat only."""
+        last = user.last_submit_date
+        if last == submit_date:
+            return 0  # already counted today (in some other guild)
+        if last == submit_date - timedelta(days=1):
+            user.global_streak += 1
+        else:
+            user.global_streak = 1
+        user.last_submit_date = submit_date
+        user.longest_global_streak = max(user.longest_global_streak, user.global_streak)
+        return user.global_streak
 
     @staticmethod
     async def _update_guild_stats(s, guild_id: int, submit_date: date) -> None:
