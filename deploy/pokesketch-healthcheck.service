@@ -1,0 +1,8 @@
+[Unit]
+Description=PokeSketchDex health check
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/pokesketch/deploy/healthcheck.sh
