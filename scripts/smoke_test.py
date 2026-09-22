@@ -121,17 +121,17 @@ async def main() -> None:
         )
         s.add(sub)
         await s.flush()
-        await pokebox.record_pokebox_catch(s, pb_uid, daily.dex_no, sub.id)
-        await pokebox.record_pokebox_catch(s, pb_uid, daily.dex_no, sub.id)  # idempotent
+        await pokebox.record_pokebox_scan(s, pb_uid, daily.dex_no, sub.id)
+        await pokebox.record_pokebox_scan(s, pb_uid, daily.dex_no, sub.id)  # idempotent
         wallet = await pokebox.get_or_create_wallet(s, pb_uid)
         wallet.balance = 25
         await s.commit()
 
     async with db.session() as s:
-        caught, total = await pokebox.pokebox_progress(s, pb_uid)
-    assert caught == 1, caught
+        scanned, total = await pokebox.pokebox_progress(s, pb_uid)
+    assert scanned == 1, scanned
     assert total == pokebox.TOTAL_DEX
-    print(f"pokebox OK: caught={caught}/{total} (double-insert stayed idempotent)")
+    print(f"pokebox OK: scanned={scanned}/{total} (double-insert stayed idempotent)")
 
     # /catch offline: stub the network image download so the smoke test stays offline.
     party_dir = os.path.join(tmp, "party_cache")
