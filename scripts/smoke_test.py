@@ -1231,6 +1231,94 @@ async def main() -> None:
     assert retro.is_active is True, retro.is_active
     print(f"event-enable OK: {enable_msg}")
 
+    # --- Built-in default Events: fresh-guild seeding, idempotency, and the
+    # under-7 recommended-size warning on /event-create and /event-edit.
+    from pokesketch.cogs.admin import EVENT_MIN_RECOMMENDED_DEX, _short_event_warning
+    from pokesketch.default_events import BUILTIN_EVENT_NAMES, seed_default_events
+
+    class _FakeSeedApi:
+        async def get_type_pokemon_dex_nos(self, type_name: str) -> list[int]:
+            # Deterministic, type-distinct dex lists — just needs to be >= the
+            # per-event minimum so the seeding assertions below are meaningful.
+            base = {"ghost": 90, "ice": 190, "bug": 290}[type_name]
+            return list(range(base, base + 12))
+
+    seed_guild = 20260929
+    async with db.session() as s:
+        seeded = await seed_default_events(s, _FakeSeedApi(), seed_guild)
+        await s.commit()
+    assert set(seeded) == BUILTIN_EVENT_NAMES, (sorted(seeded), sorted(BUILTIN_EVENT_NAMES))
+    async with db.session() as s:
+        seeded_rows = (
+            await s.execute(select(db.EventDefinition).where(db.EventDefinition.guild_id == seed_guild))
+        ).scalars().all()
+    assert len(seeded_rows) == 10, len(seeded_rows)
+    for row in seeded_rows:
+        assert len(row.dex_numbers) >= EVENT_MIN_RECOMMENDED_DEX, (row.name, len(row.dex_numbers))
+        assert row.is_active is True, row.name
+    print(
+        f"default-events seed OK: {len(seeded_rows)} built-in events created, each with "
+        f">= {EVENT_MIN_RECOMMENDED_DEX} Pokemon"
+    )
+
+    # Idempotency: re-running the seed for the same (now-seeded) guild is a no-op.
+    async with db.session() as s:
+        reseeded = await seed_default_events(s, _FakeSeedApi(), seed_guild)
+        await s.commit()
+    assert reseeded == [], reseeded
+    async with db.session() as s:
+        rows_after = (
+            await s.execute(select(db.EventDefinition).where(db.EventDefinition.guild_id == seed_guild))
+        ).scalars().all()
+    assert len(rows_after) == 10, len(rows_after)
+    print("default-events seed OK: re-running for an already-seeded guild creates no duplicates")
+
+    # Idempotency also holds if only ONE built-in name already exists (e.g. an admin
+    # manually recreated it after deleting the auto-seeded one) — seeding is skipped
+    # entirely rather than backfilling the other 9.
+    partial_guild = 20260930
+    async with db.session() as s:
+        s.add(db.EventDefinition(guild_id=partial_guild, name="bug week", dex_list="1\n2", created_by=1))
+        await s.commit()
+        partial_seeded = await seed_default_events(s, _FakeSeedApi(), partial_guild)
+        await s.commit()
+    assert partial_seeded == [], partial_seeded
+    async with db.session() as s:
+        partial_rows = (
+            await s.execute(select(db.EventDefinition).where(db.EventDefinition.guild_id == partial_guild))
+        ).scalars().all()
+    assert len(partial_rows) == 1, len(partial_rows)
+    print("default-events seed OK: a single pre-existing built-in name (case-insensitive) skips seeding entirely")
+
+    # The under-7 warning helper itself, factored out of /event-create and /event-edit
+    # for direct testability.
+    assert _short_event_warning(EVENT_MIN_RECOMMENDED_DEX - 1) is not None
+    assert _short_event_warning(EVENT_MIN_RECOMMENDED_DEX) is None
+    assert _short_event_warning(EVENT_MIN_RECOMMENDED_DEX + 5) is None
+    print("event dex-count warning helper OK: fires below the recommended minimum, silent at/above it")
+
+    # /event-create: warning appended to the success message for a short list, absent otherwise.
+    warn_guild = 20260931
+    short_interaction = _FakeAdminInteraction(warn_guild)
+    await admin_cog.event_create.callback(admin_cog, short_interaction, name="Short Event", dex_numbers="1 2 3")
+    short_msg = short_interaction.response.sent["content"]
+    assert "⚠️" in short_msg and "3 Pokemon" in short_msg, short_msg
+
+    full_interaction = _FakeAdminInteraction(warn_guild)
+    await admin_cog.event_create.callback(
+        admin_cog, full_interaction, name="Full Event", dex_numbers="1 2 3 4 5 6 7"
+    )
+    full_msg = full_interaction.response.sent["content"]
+    assert "⚠️" not in full_msg, full_msg
+    print("event-create warning OK: appended for a <7 dex list, absent for a >=7 one")
+
+    # /event-edit: same warning fires when a replacement dex list drops under 7.
+    warn_edit_interaction = _FakeAdminInteraction(warn_guild)
+    await admin_cog.event_edit.callback(admin_cog, warn_edit_interaction, name="Full Event", dex_numbers="8 9")
+    warn_edit_msg = warn_edit_interaction.response.sent["content"]
+    assert "⚠️" in warn_edit_msg, warn_edit_msg
+    print("event-edit warning OK: appended when a replaced dex list drops under 7")
+
     print("ALL SMOKE TESTS PASSED")
 
 

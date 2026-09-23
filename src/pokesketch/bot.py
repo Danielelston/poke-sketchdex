@@ -15,6 +15,7 @@ from sqlalchemy import select
 from . import db, pokebox, weeklyvote
 from .config import Config
 from .daily import post_daily_for_guild, post_wild_encounter_for_guild
+from .default_events import seed_default_events
 from .pokeapi import PokeApiClient
 
 log = logging.getLogger(__name__)
@@ -214,11 +215,20 @@ class PokeSketchDexBot(commands.Bot):
             self._commands_synced = True
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
-        """Sync commands to a newly-joined guild immediately."""
+        """Sync commands to a newly-joined guild immediately, and seed its
+        built-in wild-encounter Events so they're ready even before /setup
+        runs (seeding is idempotent, so /setup re-seeding is harmless too —
+        see cogs/admin.py's setup_cmd, which covers guilds that joined before
+        this feature shipped)."""
         target = discord.Object(id=guild.id)
         self.tree.copy_global_to(guild=target)
         await self.tree.sync(guild=target)
         log.info("Synced commands to newly joined guild %s (%s)", guild.id, guild.name)
+        async with db.session() as s:
+            seeded = await seed_default_events(s, self.api, guild.id)
+            await s.commit()
+        if seeded:
+            log.info("Guild %s: seeded %d built-in events on join.", guild.id, len(seeded))
 
     async def close(self) -> None:
         if self.scheduler.running:

@@ -73,6 +73,8 @@ def _admin_field_groups() -> list[tuple[str, str]]:
             "`/event-view` — inspect one Event's status, Pokemon list, and flavor text\n"
             "`/event-edit` — rename an Event or replace its dex list / flavor text\n"
             "`/event-disable` / `/event-enable` — retire or restore an Event without deleting it\n\n"
+            "Every server starts pre-seeded with 10 built-in Events (type-based + curated theme "
+            "weeks) — see `/event-list`.\n\n"
             "All require the **Manage Server** permission (`/event-list` and `/event-view` are "
             "viewable by anyone).",
         ),
