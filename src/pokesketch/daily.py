@@ -119,15 +119,22 @@ async def post_wild_encounter_for_guild(
     guild_id: int,
     local_date: date,
 ) -> bool:
-    """Post today's fresh random pick into the guild's active wild-encounter
-    thread, if it has one. "Active" is the most recent WeeklyVote with a
-    non-null thread_id (see weeklyvote.get_active_weekly_vote) so the
-    previous cycle's thread keeps getting daily posts with no gap while this
-    week's day-1/day-2 votes are still in progress.
+    """Post a fresh companion wild-encounter thread for today: one Pokemon
+    per thread, created new every day (not a single continuous weekly
+    thread). Draws from the guild's active WeeklyVote pool — "active" is the
+    most recent WeeklyVote with a resolved dex pool (see
+    weeklyvote.get_active_weekly_vote) so the previous cycle's pool keeps
+    supplying daily encounters with no gap while this week's day-1/day-2
+    votes are still in progress. Meant to be called right after
+    post_daily_for_guild so the wild encounter reads as a companion to that
+    day's main challenge.
     """
     async with db.session() as s:
+        cfg = await s.get(db.GuildConfig, guild_id)
+        if cfg is None or cfg.paused or not cfg.channel_id:
+            return False
         wv = await weeklyvote.get_active_weekly_vote(s, guild_id)
-        if wv is None or wv.thread_id is None:
+        if wv is None:
             return False
         dex_pool = wv.dex_pool_numbers
         if not dex_pool:
@@ -141,25 +148,33 @@ async def post_wild_encounter_for_guild(
         ).scalar_one_or_none()
         if existing is not None:
             return False  # idempotent: already posted today
-        thread_id, weekly_vote_id = wv.thread_id, wv.id
+        channel_id, weekly_vote_id = cfg.channel_id, wv.id
 
     dex_no = random.choice(dex_pool)
     ref = await api.get_pokemon(dex_no)
     images = ref.reference_images(shiny=False)
 
-    thread = client.get_channel(thread_id)
-    if thread is None:
+    channel = client.get_channel(channel_id)
+    if channel is None:
         try:
-            thread = await client.fetch_channel(thread_id)
+            channel = await client.fetch_channel(channel_id)
         except discord.DiscordException:
-            log.warning("Guild %s: wild-encounter thread %s not found.", guild_id, thread_id)
+            log.warning("Guild %s: channel %s not found.", guild_id, channel_id)
             return False
 
     embed = daily_embed(ref, False, images)
     embed.title = f"🌿 Wild encounter: #{ref.dex_no:04d} {ref.display_name()}"
-    msg = await thread.send(
-        content="A wild Pokemon appeared! Sketch it with `/submit`.", embed=embed
-    )
+    msg = await channel.send(content="A wild Pokemon appeared!", embed=embed)
+
+    thread = None
+    try:
+        thread = await msg.create_thread(
+            name=f"{local_date.isoformat()} Wild — {ref.display_name()}",
+            auto_archive_duration=1440,  # 1 day — a fresh thread posts daily, no need to keep it open longer
+        )
+        await thread.send("Sketch it with `/submit`!")
+    except discord.DiscordException as exc:
+        log.warning("Guild %s: could not create wild-encounter thread: %s", guild_id, exc)
 
     async with db.session() as s:
         s.add(
@@ -170,8 +185,12 @@ async def post_wild_encounter_for_guild(
                 dex_no=ref.dex_no,
                 name=ref.name,
                 message_id=msg.id,
+                thread_id=thread.id if thread else None,
             )
         )
         await s.commit()
-    log.info("Guild %s: posted wild encounter #%s %s.", guild_id, ref.dex_no, ref.name)
+    log.info(
+        "Guild %s: posted wild encounter #%s %s (thread=%s).",
+        guild_id, ref.dex_no, ref.name, thread.id if thread else None,
+    )
     return True

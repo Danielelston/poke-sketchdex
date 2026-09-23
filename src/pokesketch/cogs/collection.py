@@ -108,7 +108,7 @@ class Collection(commands.Cog):
 
         placement = f"active slot {mon.slot}" if mon.is_active else f"box slot {mon.slot}"
         await interaction.followup.send(
-            f"⚾ Caught **{_display_name(mon)}**! Placed in your {placement}.", ephemeral=True
+            f"⭕ Caught **{_display_name(mon)}**! Placed in your {placement}.", ephemeral=True
         )
 
     @app_commands.command(name="party", description="Show your (or someone's) 6 active party slots.")

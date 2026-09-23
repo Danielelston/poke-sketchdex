@@ -198,15 +198,16 @@ async def resolve_dex_pool(s, api: PokeApiClient, guild_id: int, category: str, 
 
 
 async def get_active_weekly_vote(s, guild_id: int) -> WeeklyVote | None:
-    """The WeeklyVote currently serving the wild-encounter thread: the most
-    recent row with a non-null thread_id (not "this calendar week's" — day-2
+    """The WeeklyVote currently supplying the wild-encounter pool: the most
+    recent row with a resolved dex pool (not "this calendar week's" — day-2
     resolution isn't guaranteed to land at a fixed time, so the *previous*
-    cycle's pool/thread must keep serving until the new one actually
-    resolves, with no gap)."""
+    cycle's pool must keep serving until the new one actually resolves, with
+    no gap). Note this no longer has anything to do with `thread_id`, which
+    is now per-day (see WildEncounter.thread_id) rather than per-week."""
     return (
         await s.execute(
             select(WeeklyVote)
-            .where(WeeklyVote.guild_id == guild_id, WeeklyVote.thread_id.is_not(None))
+            .where(WeeklyVote.guild_id == guild_id, WeeklyVote.resolved_dex_pool.is_not(None))
             .order_by(WeeklyVote.id.desc())
             .limit(1)
         )
@@ -279,44 +280,32 @@ async def post_category_poll(client: discord.Client, guild_id: int) -> bool:
 async def _finalize_weekly_vote(
     client: discord.Client, api: PokeApiClient, guild_id: int, weekly_vote_id: int, category: str, choice_key: str
 ) -> bool:
-    """Resolve resolved_dex_pool for the winning category/choice, create the
-    wild-encounter thread, and stamp thread_id + choice_key. Shared by the
-    normal day-2-resolution path and the "<2 valid choices" auto-resolve
-    edge case (no poll posted)."""
+    """Resolve resolved_dex_pool for the winning category/choice and stamp
+    choice_key. No thread is created here — wild-encounter threads are now
+    one-per-day, created fresh each day by post_wild_encounter_for_guild
+    (see daily.py) once resolved_dex_pool is set. Shared by the normal
+    day-2-resolution path and the "<2 valid choices" auto-resolve edge case
+    (no poll posted)."""
     async with db.session() as s:
         cfg = await s.get(GuildConfig, guild_id)
         if cfg is None or not cfg.channel_id:
             return False
         dex_pool = await resolve_dex_pool(s, api, guild_id, category, choice_key)
-        channel_id = cfg.channel_id
         await s.commit()  # persist any newly-cached pool rows
 
     if not dex_pool:
         log.warning(
-            "Guild %s: resolved empty dex pool for %s/%s; skipping thread creation.",
+            "Guild %s: resolved empty dex pool for %s/%s; skipping.",
             guild_id, category, choice_key,
         )
         return False
-
-    channel = await _fetch_channel(client, channel_id)
-    thread_name = f"Wild Encounters — {CATEGORY_LABELS[category]}: {choice_key}"[:100]
-    thread = await channel.create_thread(
-        name=thread_name,
-        type=discord.ChannelType.public_thread,
-        auto_archive_duration=10080,  # 1 week — matches the continuous 7-day cadence
-    )
-    await thread.send(
-        f"🌿 This week's wild encounters: **{CATEGORY_LABELS[category]} — {choice_key}**! "
-        "A fresh wild Pokemon appears here daily — sketch it with `/submit`!"
-    )
 
     async with db.session() as s:
         wv = await s.get(WeeklyVote, weekly_vote_id)
         wv.choice_key = choice_key
         wv.resolved_dex_pool = _join_dex_pool(dex_pool)
-        wv.thread_id = thread.id
         await s.commit()
-    log.info("Guild %s: resolved %s/%s -> %d dex, thread %s.", guild_id, category, choice_key, len(dex_pool), thread.id)
+    log.info("Guild %s: resolved %s/%s -> %d dex.", guild_id, category, choice_key, len(dex_pool))
     return True
 
 
@@ -389,7 +378,7 @@ async def resolve_choice_poll(client: discord.Client, api: PokeApiClient, guild_
                 select(WeeklyVote).where(WeeklyVote.guild_id == guild_id, WeeklyVote.iso_week == iso_week)
             )
         ).scalar_one_or_none()
-        if wv is None or wv.choice_poll_message_id is None or wv.thread_id is not None:
+        if wv is None or wv.choice_poll_message_id is None or wv.resolved_dex_pool is not None:
             return False  # no day-2 poll to resolve, or already resolved (e.g. auto-resolved)
         channel_id, message_id = cfg.channel_id, wv.choice_poll_message_id
         weekly_vote_id, category = wv.id, wv.category
