@@ -102,6 +102,15 @@ class Help(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="⏳ Submit vs. catch windows",
+            value=(
+                "Submitting and catching run on separate clocks — a thread often stays open "
+                "for `/submit` well after a sketch's own catch window has closed. Check a "
+                "thread's opening post or your `/submit` confirmation for the current windows."
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="🛠️ Server admin?",
             value="See `/help-admin` for setup and moderation commands.",
             inline=False,

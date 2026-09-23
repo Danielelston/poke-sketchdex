@@ -29,10 +29,13 @@ def _submission_header(display_name: str, user_mention: str) -> str:
     return f"🖼️ {display_name} by {user_mention} — react {UPVOTE_EMOJI} to upvote!"
 
 
-def _submission_confirmation(display_name: str, first_time: bool, exp_msg: str) -> str:
+def _submission_confirmation(display_name: str, first_time: bool, exp_msg: str, catch_window_hours: int) -> str:
+    catch_label = pokebox.format_duration_label(catch_window_hours)
+    bar = pokebox.duration_bar(catch_window_hours, catch_window_hours)  # just started: full bar
+    catch_suffix = f" 🎯 {bar} Catchable for {catch_label}."
     if first_time:
-        return f"✅ {display_name} submitted{exp_msg}!"
-    return f"✅ Updated your {display_name} sketch!"
+        return f"✅ {display_name} submitted{exp_msg}!{catch_suffix}"
+    return f"✅ Updated your {display_name} sketch!{catch_suffix}"
 
 
 def _is_outside_grace_window(daily_local_date: date, today_local: date, grace_period_days: int) -> bool:
@@ -164,6 +167,7 @@ class Submissions(commands.Cog):
     ) -> tuple[str, str]:
         cfg = await s.get(db.GuildConfig, gid)
         grace_period_days = cfg.grace_period_days if cfg else 7
+        catch_window_hours = cfg.catch_window_hours if cfg else 24
         tz = cfg.timezone if cfg else "UTC"
         today_local = datetime.now(ZoneInfo(tz)).date()
         if _is_outside_grace_window(daily.local_date, today_local, grace_period_days):
@@ -210,7 +214,7 @@ class Submissions(commands.Cog):
             total = await self._award_submission_rewards(s, gid, uid, daily.local_date, leveling.EXP_SUBMIT, "submit")
             exp_msg = f" (+{total} EXP)"
 
-        return _submission_confirmation(display_name, first_time, exp_msg), exp_msg
+        return _submission_confirmation(display_name, first_time, exp_msg, catch_window_hours), exp_msg
 
     async def _submit_to_wild_encounter(
         self,
@@ -224,6 +228,8 @@ class Submissions(commands.Cog):
         today_local: date,
     ) -> tuple[str, str]:
         display_name = species_display_name(wild_encounter.name)
+        cfg = await s.get(db.GuildConfig, gid)
+        catch_window_hours = cfg.catch_window_hours if cfg else 24
 
         # One submission per user per day per wild encounter (updates image if re-submitting).
         existing = (
@@ -263,7 +269,7 @@ class Submissions(commands.Cog):
             )
             exp_msg = f" (+{total} EXP)"
 
-        return _submission_confirmation(display_name, first_time, exp_msg), exp_msg
+        return _submission_confirmation(display_name, first_time, exp_msg, catch_window_hours), exp_msg
 
     @staticmethod
     async def _award_submission_rewards(s, gid: int, uid: int, submit_date: date, base_exp: int, kind: str) -> int:
