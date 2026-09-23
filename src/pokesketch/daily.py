@@ -206,6 +206,7 @@ async def post_wild_encounter_for_guild(
         channel_id, weekly_vote_id = cfg.channel_id, wv.id
         catch_window_hours = cfg.catch_window_hours
         tz_name = cfg.timezone
+        theme_category, theme_choice_key = wv.category, wv.choice_key
 
     dex_no = random.choice(dex_pool)
     ref = await api.get_pokemon(dex_no)
@@ -221,6 +222,9 @@ async def post_wild_encounter_for_guild(
 
     embed = daily_embed(ref, False, images)
     embed.title = f"🌿 Wild encounter: #{ref.dex_no:04d} {ref.display_name()}"
+    if theme_category == weeklyvote.CATEGORY_TYPE and theme_choice_key:
+        theme_emoji = weeklyvote.type_emoji(theme_choice_key)
+        embed.set_footer(text=f"{theme_emoji} This week's theme: {theme_choice_key.title()}-type")
     msg = await channel.send(content="A wild Pokemon appeared!", embed=embed)
 
     thread = None
