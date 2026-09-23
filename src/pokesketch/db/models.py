@@ -217,6 +217,8 @@ class PokeballWallet(Base):
     __tablename__ = "pokeball_wallets"
 
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # New wallets start with a starter grant (see pokebox.STARTER_POKEBALLS) rather
+    # than 0, so a brand-new player can /catch immediately without waiting a week.
     balance: Mapped[int] = mapped_column(Integer, default=0)
     # ISO week the last weekly grant landed, e.g. "2026-W39" — idempotency guard
     # so a mid-week restart doesn't double-grant.
