@@ -9,7 +9,7 @@ from datetime import date
 import discord
 from sqlalchemy import select
 
-from . import db, weeklyvote
+from . import db, pokebox, weeklyvote
 from .embeds import daily_embed
 from .pokeapi import PokeApiClient
 from .selection import pick_dex_no
@@ -32,6 +32,22 @@ def _archive_duration_for_grace(grace_period_days: int) -> int:
         if tier >= target:
             return tier
     return ARCHIVE_DURATION_TIERS[-1]
+
+
+def _window_summary_line(grace_period_days: int, catch_window_hours: int) -> str:
+    """Static, non-stale summary of the two configured windows for a thread's
+    opening post: states durations (\"24h per sketch\"), never a countdown, so
+    it stays accurate for the life of the thread regardless of when it's read.
+    The bar shows the catch window as a fraction of the submit window (equal
+    windows render as a fully-filled bar, correctly implying no gap)."""
+    grace_hours = grace_period_days * 24
+    bar = pokebox.duration_bar(catch_window_hours, grace_hours)
+    submit_label = pokebox.format_duration_label(grace_hours)
+    catch_label = pokebox.format_duration_label(catch_window_hours)
+    return (
+        f"⏳ Submit window: {submit_label} • Catch window: {catch_label} per sketch\n"
+        f"{bar} catch window = first {catch_label} of the {submit_label} submit window"
+    )
 
 
 async def post_daily_for_guild(
@@ -60,6 +76,7 @@ async def post_daily_for_guild(
         channel_id, role_id = cfg.channel_id, cfg.role_id
         dex_min, dex_max, mode = cfg.dex_min, cfg.dex_max, cfg.selection_mode
         grace_period_days = cfg.grace_period_days
+        catch_window_hours = cfg.catch_window_hours
 
     dex_no = await pick_dex_no(guild_id, dex_min, dex_max, mode)
     ref = await api.get_pokemon(dex_no)
@@ -90,7 +107,8 @@ async def post_daily_for_guild(
         )
         await thread.send(
             "Post your sketches here with `/submit`! You can also chat about "
-            "today's Pokemon. React 👍 to upvote entries."
+            "today's Pokemon. React 👍 to upvote entries.\n"
+            f"{_window_summary_line(grace_period_days, catch_window_hours)}"
         )
     except discord.DiscordException as exc:
         log.warning("Guild %s: could not create thread: %s", guild_id, exc)
@@ -149,6 +167,8 @@ async def post_wild_encounter_for_guild(
         if existing is not None:
             return False  # idempotent: already posted today
         channel_id, weekly_vote_id = cfg.channel_id, wv.id
+        grace_period_days = cfg.grace_period_days
+        catch_window_hours = cfg.catch_window_hours
 
     dex_no = random.choice(dex_pool)
     ref = await api.get_pokemon(dex_no)
@@ -172,7 +192,10 @@ async def post_wild_encounter_for_guild(
             name=f"{local_date.isoformat()} Wild — {ref.display_name()}",
             auto_archive_duration=1440,  # 1 day — a fresh thread posts daily, no need to keep it open longer
         )
-        await thread.send("Sketch it with `/submit`!")
+        await thread.send(
+            "Sketch it with `/submit`!\n"
+            f"{_window_summary_line(grace_period_days, catch_window_hours)}"
+        )
     except discord.DiscordException as exc:
         log.warning("Guild %s: could not create wild-encounter thread: %s", guild_id, exc)
 

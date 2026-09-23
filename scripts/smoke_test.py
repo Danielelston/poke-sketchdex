@@ -339,8 +339,12 @@ async def main() -> None:
     assert species_display_name("mr-mime") == "Mr Mime", species_display_name("mr-mime")
     header = _submission_header(species_display_name("pikachu"), "<@123>")
     assert header == "🖼️ Pikachu by <@123> — react 👍 to upvote!", header
-    assert _submission_confirmation("Pikachu", True, " (+15 EXP)") == "✅ Pikachu submitted (+15 EXP)!"
-    assert _submission_confirmation("Pikachu", False, "") == "✅ Updated your Pikachu sketch!"
+    assert _submission_confirmation("Pikachu", True, " (+15 EXP)", 24) == (
+        "✅ Pikachu submitted (+15 EXP)! 🎯 " + "[" + "█" * 10 + "]" + " Catchable for 1d."
+    )
+    assert _submission_confirmation("Pikachu", False, "", 24) == (
+        "✅ Updated your Pikachu sketch! 🎯 " + "[" + "█" * 10 + "]" + " Catchable for 1d."
+    )
     print("header/confirmation OK: both name the Pokemon via the shared display-name helper")
 
     # Issue 2: grace-window cutoff is a pure guild-local date comparison.
@@ -774,6 +778,50 @@ async def main() -> None:
     print("catch OK: wild-encounter submission caught via /catch, dropped from eligibility after")
 
     await db.dispose()
+
+    # Submit-vs-catch window visual: format_duration_label / duration_bar / the
+    # /submit confirmation's live catch-window label+bar.
+    from pokesketch.cogs.submissions import _submission_confirmation
+    from pokesketch.daily import _window_summary_line
+    from pokesketch.pokebox import duration_bar, format_duration_label
+
+    assert format_duration_label(4) == "4h", format_duration_label(4)
+    assert format_duration_label(24) == "1d", format_duration_label(24)
+    assert format_duration_label(36) == "2d", format_duration_label(36)
+    assert format_duration_label(168) == "7d", format_duration_label(168)
+    print("format_duration_label OK: 4h/1d/2d/7d")
+
+    # duration_bar: 0 -> empty, full -> fully filled, small-but-nonzero -> at
+    # least 1 filled cell (never renders a real window as fully empty).
+    assert duration_bar(0, 24) == "[" + "░" * 10 + "]", duration_bar(0, 24)
+    assert duration_bar(24, 24) == "[" + "█" * 10 + "]", duration_bar(24, 24)
+    small_bar = duration_bar(1, 168)
+    assert small_bar.count("█") == 1, small_bar
+    print(f"duration_bar OK: empty={duration_bar(0, 24)}, full={duration_bar(24, 24)}, small={small_bar}")
+
+    # Equal-windows degenerate case: catch_window_hours == grace_period_days*24
+    # must render as a fully-filled bar and matching-unit labels (no implied gap).
+    equal_line = _window_summary_line(grace_period_days=7, catch_window_hours=168)
+    assert "Submit window: 7d" in equal_line, equal_line
+    assert "Catch window: 7d" in equal_line, equal_line
+    assert "█" * 10 in equal_line, equal_line
+    print("window summary OK: equal submit/catch windows render as a fully-filled bar")
+
+    default_line = _window_summary_line(grace_period_days=7, catch_window_hours=23)
+    assert "Submit window: 7d" in default_line, default_line
+    assert "Catch window: 23h" in default_line, default_line
+    print(f"window summary OK (default config): {default_line.splitlines()[0]}")
+
+    confirmation = _submission_confirmation("Pikachu", True, " (+15 EXP)", 23)
+    assert "Pikachu submitted (+15 EXP)!" in confirmation, confirmation
+    assert "Catchable for 23h" in confirmation, confirmation
+    assert "█" * 10 in confirmation, confirmation  # just-submitted: full bar
+    print(f"submission confirmation OK: {confirmation}")
+
+    update_confirmation = _submission_confirmation("Bulbasaur", False, "", 168)
+    assert "Updated your Bulbasaur sketch!" in update_confirmation, update_confirmation
+    assert "Catchable for 7d" in update_confirmation, update_confirmation
+    print(f"submission update confirmation OK: {update_confirmation}")
 
     # /help: EXP explainer should always reflect the live leveling constants
     # (no hardcoded numbers to drift out of sync with the award logic).

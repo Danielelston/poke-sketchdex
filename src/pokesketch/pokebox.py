@@ -219,16 +219,45 @@ async def catchable_submissions(s, user_id: int) -> list[tuple[CatchableSubmissi
     return out
 
 
+def format_duration_label(hours: float) -> str:
+    """Human label for a duration: \"Nh\" under 24h, else \"Nd\" (rounded up).
+
+    Shared by catch_label_parts() (remaining time) and the submit/catch
+    window summaries in daily.py / submissions.py (fixed durations) so
+    there's one place deciding "24h" vs "1d" wording.
+    """
+    if hours < 24:
+        return f"{max(1, ceil(hours))}h"
+    return f"{ceil(hours / 24)}d"
+
+
+def duration_bar(numerator_hours: float, denominator_hours: float, width: int = 10) -> str:
+    """Render a `width`-cell ASCII bar of numerator_hours / denominator_hours.
+
+    Used both as a static ratio (catch window as a fraction of the submit
+    window, in a thread-opening post) and as a live countdown (remaining
+    catch time / total catch window, in a /submit confirmation). Clamped to
+    at least 1 filled cell whenever numerator_hours > 0, so a real-but-short
+    window never renders as a fully-empty bar.
+    """
+    if denominator_hours <= 0:
+        filled = width
+    else:
+        ratio = max(0.0, min(1.0, numerator_hours / denominator_hours))
+        filled = round(width * ratio)
+        if numerator_hours > 0:
+            filled = max(1, filled)
+        filled = min(width, filled)
+    return "[" + "█" * filled + "░" * (width - filled) + "]"
+
+
 def catch_label_parts(sub: CatchableSubmission, catch_window_hours: int) -> tuple[str, str, str]:
     """Return (species display name, relative day label, time-left label) for a
     /catch autocomplete choice, e.g. ("Pikachu", "today", "18h left")."""
     now = _naive_utcnow()
     expires_at = sub.created_at + timedelta(hours=catch_window_hours)
     remaining_hours = (expires_at - now).total_seconds() / 3600
-    if remaining_hours < 24:
-        time_left = f"{max(1, ceil(remaining_hours))}h left"
-    else:
-        time_left = f"{ceil(remaining_hours / 24)}d left"
+    time_left = f"{format_duration_label(remaining_hours)} left"
     created_date = sub.created_at.date()
     day_label = "today" if created_date == now.date() else f"{created_date:%b} {created_date.day}"
     return species_display_name(sub.species_name), day_label, time_left
