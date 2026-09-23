@@ -21,6 +21,21 @@ log = logging.getLogger(__name__)
 TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _ALL_TZ = available_timezones()
 
+GRACE_PERIOD_MIN_DAYS = 1
+GRACE_PERIOD_MAX_DAYS = 30
+
+
+def _validate_grace_period(days: int) -> bool:
+    return GRACE_PERIOD_MIN_DAYS <= days <= GRACE_PERIOD_MAX_DAYS
+
+
+def _validate_catch_window(hours: int, grace_period_days: int) -> bool:
+    return 1 <= hours <= grace_period_days * 24
+
+
+def _clamp_catch_window(catch_window_hours: int, grace_period_days: int) -> int:
+    return min(catch_window_hours, grace_period_days * 24)
+
 
 async def _get_or_create_cfg(guild_id: int) -> db.GuildConfig:
     async with db.session() as s:
@@ -119,6 +134,75 @@ class Admin(commands.Cog):
             await s.commit()
         await interaction.response.send_message(
             f"Dex range set to #{dex_min}–#{dex_max}.", ephemeral=True
+        )
+
+    @app_commands.command(
+        name="set-grace-period",
+        description="Set how many days back a thread stays open for /submit backfill.",
+    )
+    @app_commands.describe(
+        days=f"Days back a thread accepts /submit ({GRACE_PERIOD_MIN_DAYS}-{GRACE_PERIOD_MAX_DAYS}, default 7)"
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def set_grace_period(self, interaction: discord.Interaction, days: int) -> None:
+        if not _validate_grace_period(days):
+            await interaction.response.send_message(
+                f"Grace period must be {GRACE_PERIOD_MIN_DAYS}-{GRACE_PERIOD_MAX_DAYS} days.",
+                ephemeral=True,
+            )
+            return
+        async with db.session() as s:
+            cfg = await s.get(db.GuildConfig, interaction.guild_id)
+            if cfg is None:
+                await interaction.response.send_message("Run `/setup` first.", ephemeral=True)
+                return
+            cfg.grace_period_days = days
+            clamp_note = ""
+            clamped = _clamp_catch_window(cfg.catch_window_hours, days)
+            if clamped != cfg.catch_window_hours:
+                cfg.catch_window_hours = clamped
+                clamp_note = (
+                    f" Catch window was also clamped down to **{clamped}h** to stay within "
+                    "the new grace period."
+                )
+            await s.commit()
+        archive_note = ""
+        if days > 7:
+            archive_note = (
+                " Note: Discord's visible thread auto-archive tier still caps at 7 days — "
+                "archived threads auto-unarchive the moment `/submit` posts into them, so "
+                "going beyond 7 only affects the submission cutoff, not the thread's displayed state."
+            )
+        await interaction.response.send_message(
+            f"✅ Submission grace period set to **{days} day{'s' if days != 1 else ''}**."
+            f"{clamp_note}{archive_note}",
+            ephemeral=True,
+        )
+
+    @app_commands.command(
+        name="set-catch-window",
+        description="Set how many hours a submission stays catchable via /catch.",
+    )
+    @app_commands.describe(hours="Hours a submission stays catchable (1 to grace_period_days*24, default 24)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def set_catch_window(self, interaction: discord.Interaction, hours: int) -> None:
+        async with db.session() as s:
+            cfg = await s.get(db.GuildConfig, interaction.guild_id)
+            if cfg is None:
+                await interaction.response.send_message("Run `/setup` first.", ephemeral=True)
+                return
+            if not _validate_catch_window(hours, cfg.grace_period_days):
+                max_hours = cfg.grace_period_days * 24
+                await interaction.response.send_message(
+                    f"Catch window must be 1-{max_hours} hours (can't exceed the "
+                    f"{cfg.grace_period_days}-day grace period).",
+                    ephemeral=True,
+                )
+                return
+            cfg.catch_window_hours = hours
+            await s.commit()
+        await interaction.response.send_message(
+            f"✅ Catch window set to **{hours}h**.", ephemeral=True
         )
 
     @app_commands.command(name="pause", description="Pause daily posts.")
