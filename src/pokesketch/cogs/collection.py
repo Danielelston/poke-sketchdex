@@ -69,7 +69,7 @@ class Collection(commands.Cog):
                 guild_name = guild.name if guild else str(sub.guild_id)
                 day_label = f"{day_label} ({guild_name})"
             label = f"{species} — {day_label}, {time_left}"
-            results.append((label, str(sub.id)))
+            results.append((label, pokebox.encode_catch_target(sub)))
 
         if current:
             cur = current.lower()
@@ -95,22 +95,11 @@ class Collection(commands.Cog):
         nickname: str | None = None,
     ) -> None:
         await interaction.response.defer(thinking=True, ephemeral=True)
-        target_id: int | None = None
-        if target is not None:
-            try:
-                target_id = int(target)
-            except ValueError:
-                await interaction.followup.send(
-                    "❌ That sketch is no longer catchable — it may be outside the window or "
-                    "already caught. Run `/catch` again to see current options.",
-                    ephemeral=True,
-                )
-                return
         try:
             async with db.session() as s:
                 mon = await pokebox.catch_submission(
                     s, interaction.user.id, self.bot.config.party_cache_dir,
-                    target_submission_id=target_id, nickname=nickname,
+                    target=target, nickname=nickname,
                 )
                 await s.commit()
         except pokebox.CatchError as exc:
