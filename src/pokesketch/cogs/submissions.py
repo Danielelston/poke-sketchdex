@@ -17,7 +17,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import func, select
 
-from .. import db, leveling, pokebox
+from .. import db, gym, leveling, pokebox
 from ..formatting import species_display_name
 
 log = logging.getLogger(__name__)
@@ -128,11 +128,12 @@ class Submissions(commands.Cog):
             ).scalar_one_or_none()
 
             if daily is not None:
-                confirmation, _exp_msg = await self._submit_to_daily(
+                confirmation, _exp_msg, gym_result = await self._submit_to_daily(
                     s, daily, channel, image, gid, uid, interaction.user.mention
                 )
                 await s.commit()
                 await interaction.followup.send(confirmation, ephemeral=True)
+                await self._maybe_announce_gym_defeat(gym_result)
                 return
 
             cfg = await s.get(db.GuildConfig, gid)
@@ -147,12 +148,20 @@ class Submissions(commands.Cog):
                 )
                 return
 
-            confirmation, _exp_msg = await self._submit_to_wild_encounter(
+            confirmation, _exp_msg, gym_result = await self._submit_to_wild_encounter(
                 s, wild_encounter, channel, image, gid, uid, interaction.user.mention, today_local
             )
             await s.commit()
 
         await interaction.followup.send(confirmation, ephemeral=True)
+        await self._maybe_announce_gym_defeat(gym_result)
+
+    async def _maybe_announce_gym_defeat(self, gym_result: tuple[db.GymEvent, bool] | None) -> None:
+        if gym_result is None:
+            return
+        event, just_defeated = gym_result
+        if just_defeated:
+            await gym.announce_defeat(self.bot, event)
 
     async def _submit_to_daily(
         self,
@@ -163,7 +172,7 @@ class Submissions(commands.Cog):
         gid: int,
         uid: int,
         mention: str,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, tuple[db.GymEvent, bool] | None]:
         cfg = await s.get(db.GuildConfig, gid)
         grace_period_days = cfg.grace_period_days if cfg else 7
         catch_window_hours = cfg.catch_window_hours if cfg else 24
@@ -174,6 +183,7 @@ class Submissions(commands.Cog):
                 f"This thread's Pokémon is outside the {grace_period_days}-day submission "
                 "window and can no longer accept new sketches.",
                 "",
+                None,
             )
 
         display_name = species_display_name(daily.name)
@@ -209,13 +219,16 @@ class Submissions(commands.Cog):
         await pokebox.record_pokebox_scan(s, uid, daily.dex_no, sub.id)
 
         exp_msg = ""
+        gym_result = None
         if first_time:
             total = await self._award_submission_rewards(s, gid, uid, daily.local_date, leveling.EXP_SUBMIT, "submit")
             exp_msg = f" (+{total} EXP)"
+            gym_result = await gym.record_contribution(s, gid, uid, gym.KIND_SUBMIT)
 
-        return _submission_confirmation(
+        confirmation = _submission_confirmation(
             display_name, first_time, exp_msg, sub.created_at + timedelta(hours=catch_window_hours)
-        ), exp_msg
+        )
+        return confirmation, exp_msg, gym_result
 
     async def _submit_to_wild_encounter(
         self,
@@ -227,7 +240,7 @@ class Submissions(commands.Cog):
         uid: int,
         mention: str,
         today_local: date,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, tuple[db.GymEvent, bool] | None]:
         display_name = species_display_name(wild_encounter.name)
         cfg = await s.get(db.GuildConfig, gid)
         catch_window_hours = cfg.catch_window_hours if cfg else 24
@@ -264,15 +277,18 @@ class Submissions(commands.Cog):
         await pokebox.record_pokebox_scan(s, uid, wild_encounter.dex_no, None)
 
         exp_msg = ""
+        gym_result = None
         if first_time:
             total = await self._award_submission_rewards(
                 s, gid, uid, today_local, leveling.EXP_WILD_ENCOUNTER, "wild_submit"
             )
             exp_msg = f" (+{total} EXP)"
+            gym_result = await gym.record_contribution(s, gid, uid, gym.KIND_SUBMIT)
 
-        return _submission_confirmation(
+        confirmation = _submission_confirmation(
             display_name, first_time, exp_msg, sub.created_at + timedelta(hours=catch_window_hours)
-        ), exp_msg
+        )
+        return confirmation, exp_msg, gym_result
 
     @staticmethod
     async def _award_submission_rewards(s, gid: int, uid: int, submit_date: date, base_exp: int, kind: str) -> int:
@@ -370,17 +386,23 @@ class Submissions(commands.Cog):
                     )
                 )
             ).scalar_one_or_none()
+            gym_results: list[tuple[db.GymEvent, bool] | None] = []
             if added and existing is None:
                 s.add(db.Upvote(submission_id=sub.id, voter_id=payload.user_id))
-                await self._maybe_award_upvote_received_exp(s, sub)
-                await self._maybe_award_upvote_given_exp(s, sub.guild_id, payload.user_id)
+                gym_results.append(await self._maybe_award_upvote_received_exp(s, sub))
+                gym_results.append(await self._maybe_award_upvote_given_exp(s, sub.guild_id, payload.user_id))
             elif not added and existing is not None:
                 await s.delete(existing)
             await s.commit()
 
+        for gym_result in gym_results:
+            if gym_result is not None and gym_result[1]:
+                await gym.announce_defeat(self.bot, gym_result[0])
+
     @staticmethod
-    async def _maybe_award_upvote_received_exp(s, sub: db.Submission) -> None:
-        """Award EXP to the artist for receiving an upvote, capped per day."""
+    async def _maybe_award_upvote_received_exp(s, sub: db.Submission) -> tuple[db.GymEvent, bool] | None:
+        """Award EXP to the artist for receiving an upvote, capped per day, and
+        (independently, with its own cap) log a gym contribution."""
         today_total = (
             await s.execute(
                 select(func.coalesce(func.sum(db.ExpEvent.amount), 0)).where(
@@ -393,10 +415,12 @@ class Submissions(commands.Cog):
         ).scalar_one()
         if today_total < leveling.EXP_UPVOTE_RECEIVED_DAILY_CAP:
             await _award_exp(s, sub.guild_id, sub.user_id, "upvote_received", leveling.EXP_PER_UPVOTE_RECEIVED)
+        return await gym.record_contribution(s, sub.guild_id, sub.user_id, gym.KIND_UPVOTE_RECEIVED)
 
     @staticmethod
-    async def _maybe_award_upvote_given_exp(s, guild_id: int, voter_id: int) -> None:
-        """Award EXP to the voter for giving an upvote, capped per day."""
+    async def _maybe_award_upvote_given_exp(s, guild_id: int, voter_id: int) -> tuple[db.GymEvent, bool] | None:
+        """Award EXP to the voter for giving an upvote, capped per day, and
+        also log a gym contribution (no daily cap on this side, per design)."""
         today_total = (
             await s.execute(
                 select(func.coalesce(func.sum(db.ExpEvent.amount), 0)).where(
@@ -409,6 +433,7 @@ class Submissions(commands.Cog):
         ).scalar_one()
         if today_total < leveling.EXP_UPVOTE_GIVEN_DAILY_CAP:
             await _award_exp(s, guild_id, voter_id, "upvote_given", leveling.EXP_PER_UPVOTE_GIVEN)
+        return await gym.record_contribution(s, guild_id, voter_id, gym.KIND_UPVOTE_GIVEN)
 
 
 async def setup(bot: commands.Bot) -> None:

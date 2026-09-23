@@ -78,6 +78,14 @@ def _admin_field_groups() -> list[tuple[str, str]]:
             "All require the **Manage Server** permission (`/event-list` and `/event-view` are "
             "viewable by anyone).",
         ),
+        (
+            "⚔️ Gym Events",
+            "`/gym start` — launch a Gym Event: a named leader with an HP pool that submissions "
+            "and upvotes chip away at over a set duration\n"
+            "`/gym end` — manually end the current gym event early (no badges if HP > 0)\n\n"
+            "Only one gym event can be active per server at a time. See `/gym status` / "
+            "`/gym badges` in `/help` for the player-facing side.",
+        ),
     ]
 
 
@@ -130,6 +138,14 @@ class Help(commands.Cog):
             "Submitting and catching run on separate clocks — a thread often stays open "
             "for `/submit` well after a sketch's own catch window has closed. Check a "
             "thread's opening post or your `/submit` confirmation for the current windows.",
+        )
+        _add_guarded_field(
+            embed,
+            "⚔️ Gym Events",
+            "`/gym status` — current gym leader's HP, time remaining, and top contributors\n"
+            "`/gym badges [user]` — your (or someone's) earned gym badges\n"
+            "-# Submitting, giving upvotes, and getting upvoted (capped) all chip away at the "
+            "gym leader's HP while a gym event is active — see `/help-admin` for `/gym start`.",
         )
         _add_guarded_field(embed, "🛠️ Server admin?", "See `/help-admin` for setup and moderation commands.")
         embed.set_footer(text="PokeSketchDex • one Pokemon a day")
