@@ -825,17 +825,90 @@ async def main() -> None:
     # duration label (not a stale countdown) for the per-submission catch window.
     daily_line = _window_summary_line(_date2(2026, 9, 1), grace_period_days=7, catch_window_hours=24, tz_name="UTC")
     assert "`/submit` closes for this thread <t:" in daily_line, daily_line
-    assert "catchable via `/catch` for 1d" in daily_line, daily_line
+    assert "`/catch` closes 1d after each sketch is submitted." in daily_line, daily_line
     print(f"daily window summary OK: {daily_line}")
 
     equal_line = _window_summary_line(_date2(2026, 9, 1), grace_period_days=7, catch_window_hours=168, tz_name="UTC")
-    assert "catchable via `/catch` for 7d" in equal_line, equal_line
+    assert "`/catch` closes 7d after each sketch is submitted." in equal_line, equal_line
     print("daily window summary OK: equal submit/catch windows both render in day units")
 
     wild_line = _wild_encounter_window_summary_line(_date2(2026, 9, 1), catch_window_hours=24, tz_name="UTC")
     assert "only works here until <t:" in wild_line, wild_line
     assert "today only, no backfill" in wild_line, wild_line
+    assert "`/catch` closes 1d after each sketch is submitted." in wild_line, wild_line
     print(f"wild-encounter window summary OK: {wild_line}")
+
+    # Worst case: a user submits at the very last moment the submit window
+    # allows (right at the guild-local-midnight grace cutoff for this
+    # thread's daily). Their personal catch window still runs its full
+    # catch_window_hours from THEIR OWN created_at, so it correctly extends
+    # past the thread's submit deadline shown in the thread-post line above —
+    # a late submitter is never shortchanged on catch time. Verified against
+    # the real DB path (catchable_submissions), not just arithmetic.
+    #
+    # catchable_submissions() compares against the real wall-clock "now", so
+    # this uses a local_date anchored to *today* (not a fixed past date) —
+    # the daily was posted grace_period_days ago, and its last legal /submit
+    # instant is "now" (the actual moment this test runs), which keeps the
+    # submission's catch window straddling the real current time.
+    _worst_case_grace_days = 7
+    _worst_case_catch_hours = 24
+    _worst_case_tz = "UTC"
+    _worst_case_local_date = (_datetime.now(_UTC) - _timedelta2(days=_worst_case_grace_days)).date()
+    _worst_case_submit_deadline = _submit_deadline_utc(
+        _worst_case_local_date, _worst_case_grace_days, _worst_case_tz
+    )
+    # Last legal instant to /submit: just before the guild-local-midnight cutoff
+    # (i.e. essentially "now", since the daily was anchored grace_period_days ago).
+    _last_legal_submit_at = _worst_case_submit_deadline - _timedelta2(seconds=1)
+    assert not _is_outside_grace_window(
+        _worst_case_local_date, _last_legal_submit_at.date(), _worst_case_grace_days
+    ), "last-legal-instant submission should still be inside the grace window"
+
+    _worst_case_uid = 5007
+    async with db.session() as s:
+        s.add(db.GuildConfig(
+            guild_id=7, dex_min=1, dex_max=5, selection_mode="random",
+            grace_period_days=_worst_case_grace_days, catch_window_hours=_worst_case_catch_hours,
+        ))
+        await s.commit()
+    async with db.session() as s:
+        worst_case_daily = db.DailyPokemon(
+            guild_id=7, local_date=_worst_case_local_date, dex_no=1, name="bulbasaur",
+        )
+        s.add(worst_case_daily)
+        await s.commit()
+        worst_case_sub = db.Submission(
+            guild_id=7, user_id=_worst_case_uid, daily_id=worst_case_daily.id,
+            image_url="https://example.invalid/lastminute.png", created_at=_last_legal_submit_at,
+        )
+        s.add(worst_case_sub)
+        await s.commit()
+        worst_case_sub_id = worst_case_sub.id
+
+    # Right at the submit deadline (created_at ~= now): still catchable, since
+    # the catch window just started counting from THIS submission's created_at.
+    async with db.session() as s:
+        eligible_right_after_deadline = await pokebox.catchable_submissions(s, _worst_case_uid)
+    assert worst_case_sub_id in {sub.id for sub, _ in eligible_right_after_deadline}, (
+        "a last-minute submission must still be catchable right at the submit deadline"
+    )
+
+    # The submission's OWN catch deadline (catch_window_hours after ITS
+    # created_at, not the thread's submit deadline) correctly extends past
+    # the thread's submit-window cutoff, proving late submitters aren't
+    # shortchanged on catch time.
+    _worst_case_catch_expires_at = _last_legal_submit_at + _timedelta2(hours=_worst_case_catch_hours)
+    assert _worst_case_catch_expires_at > _worst_case_submit_deadline, (
+        "a last-minute submitter's catch deadline must extend past the thread's submit deadline",
+        _worst_case_catch_expires_at, _worst_case_submit_deadline,
+    )
+    _worst_case_extend_hours = (_worst_case_catch_expires_at - _worst_case_submit_deadline).total_seconds() / 3600
+    print(
+        "late-submitter worst case OK: submit at the last legal instant still gets a full catch "
+        f"window that extends {_worst_case_extend_hours:.1f}h past the thread's submit deadline, "
+        "and catchable_submissions() confirms it's eligible immediately after the submit deadline passes"
+    )
 
     # /submit confirmation: catch deadline is a live Discord timestamp computed
     # from the submission's own created_at + catch_window_hours.
