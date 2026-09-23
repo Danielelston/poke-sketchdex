@@ -56,6 +56,35 @@ TYPE_NAMES = [
     "flying", "psychic", "bug", "rock", "ghost", "dragon", "dark", "steel", "fairy",
 ]
 
+# Flavor emoji per type, shown on the day-2 ballot answers and on the wild-
+# encounter announcement once a Type category wins, so "this week's theme"
+# reads at a glance instead of as bare text.
+TYPE_EMOJI = {
+    "normal": "⚪️",
+    "fire": "🔥",
+    "water": "💧",
+    "electric": "⚡️",
+    "grass": "🌼",
+    "ice": "❄️",
+    "fighting": "💪",
+    "poison": "⚠️",
+    "ground": "⛰️",
+    "flying": "🪽",
+    "psychic": "🔮",
+    "bug": "🕷",
+    "rock": "🪨",
+    "ghost": "👻",
+    "dragon": "🐲",
+    "dark": "🌑",
+    "steel": "⚙️",
+    "fairy": "🧚",
+}
+
+
+def type_emoji(type_name: str) -> str:
+    """Emoji for a type name, or 🌟 as a safe fallback for unrecognized input."""
+    return TYPE_EMOJI.get(type_name.lower(), "🌟")
+
 HABITAT_NAMES = ["cave", "forest", "grassland", "mountain", "rare", "rough-terrain", "sea", "urban", "waters-edge"]
 
 # Curated (PokeAPI location-area id, slug, display name). PokeAPI has
@@ -152,7 +181,7 @@ async def _day2_candidates(s, api: PokeApiClient, guild_id: int, category: str) 
     needing to persist a separate mapping between the two pipeline runs.
     """
     if category == CATEGORY_TYPE:
-        return [(t.title(), t) for t in TYPE_NAMES]
+        return [(f"{type_emoji(t)} {t.title()}", t) for t in TYPE_NAMES]
     if category == CATEGORY_HABITAT:
         return [(_habitat_display(h), h) for h in HABITAT_NAMES]
     if category == CATEGORY_GENERATION:
