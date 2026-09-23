@@ -222,33 +222,27 @@ async def catchable_submissions(s, user_id: int) -> list[tuple[CatchableSubmissi
 def format_duration_label(hours: float) -> str:
     """Human label for a duration: \"Nh\" under 24h, else \"Nd\" (rounded up).
 
-    Shared by catch_label_parts() (remaining time) and the submit/catch
-    window summaries in daily.py / submissions.py (fixed durations) so
-    there's one place deciding "24h" vs "1d" wording.
+    Used for describing a fixed duration (e.g. "24h" as a catch window's
+    length) — not a live countdown. Live/self-updating deadlines should use
+    discord_timestamp() instead, which Discord renders client-side and keeps
+    ticking without the bot re-editing anything.
     """
     if hours < 24:
         return f"{max(1, ceil(hours))}h"
     return f"{ceil(hours / 24)}d"
 
 
-def duration_bar(numerator_hours: float, denominator_hours: float, width: int = 10) -> str:
-    """Render a `width`-cell ASCII bar of numerator_hours / denominator_hours.
+def discord_timestamp(dt: datetime, style: str = "R") -> str:
+    """Render a naive-UTC datetime as Discord's <t:UNIX:style> markdown.
 
-    Used both as a static ratio (catch window as a fraction of the submit
-    window, in a thread-opening post) and as a live countdown (remaining
-    catch time / total catch window, in a /submit confirmation). Clamped to
-    at least 1 filled cell whenever numerator_hours > 0, so a real-but-short
-    window never renders as a fully-empty bar.
+    Discord renders this client-side and keeps it live (style "R" = dynamic
+    relative countdown, e.g. "in 3 hours" / "5 minutes ago"), correctly
+    localized to each viewer's own timezone, with no bot-side re-editing
+    needed. `dt` is assumed naive-UTC (the convention this module already
+    uses for DB-round-tripped timestamps — see _naive_utcnow()).
     """
-    if denominator_hours <= 0:
-        filled = width
-    else:
-        ratio = max(0.0, min(1.0, numerator_hours / denominator_hours))
-        filled = round(width * ratio)
-        if numerator_hours > 0:
-            filled = max(1, filled)
-        filled = min(width, filled)
-    return "[" + "█" * filled + "░" * (width - filled) + "]"
+    epoch_seconds = int(dt.replace(tzinfo=UTC).timestamp())
+    return f"<t:{epoch_seconds}:{style}>"
 
 
 def catch_label_parts(sub: CatchableSubmission, catch_window_hours: int) -> tuple[str, str, str]:

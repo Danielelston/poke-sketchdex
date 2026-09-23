@@ -329,6 +329,9 @@ async def main() -> None:
     # --- Submission UX Fixes: header naming, grace/catch windows, nicknames, help split ---
 
     # Issue 1/5: shared display-name helper + header/confirmation copy name the Pokemon.
+    from datetime import datetime as _dt_early
+    from datetime import timedelta as _timedelta_early
+
     from pokesketch.cogs.submissions import (
         _is_outside_grace_window,
         _submission_confirmation,
@@ -339,12 +342,12 @@ async def main() -> None:
     assert species_display_name("mr-mime") == "Mr Mime", species_display_name("mr-mime")
     header = _submission_header(species_display_name("pikachu"), "<@123>")
     assert header == "🖼️ Pikachu by <@123> — react 👍 to upvote!", header
-    assert _submission_confirmation("Pikachu", True, " (+15 EXP)", 24) == (
-        "✅ Pikachu submitted (+15 EXP)! 🎯 " + "[" + "█" * 10 + "]" + " Catchable for 1d."
-    )
-    assert _submission_confirmation("Pikachu", False, "", 24) == (
-        "✅ Updated your Pikachu sketch! 🎯 " + "[" + "█" * 10 + "]" + " Catchable for 1d."
-    )
+    _sample_created_at = _dt_early(2026, 9, 1, 12, 0, 0)
+    _sample_expires_at = _sample_created_at + _timedelta_early(hours=24)
+    confirmation_text = _submission_confirmation("Pikachu", True, " (+15 EXP)", _sample_expires_at)
+    assert confirmation_text.startswith("✅ Pikachu submitted (+15 EXP)! 🎯 Catchable until <t:"), confirmation_text
+    update_text = _submission_confirmation("Pikachu", False, "", _sample_expires_at)
+    assert update_text.startswith("✅ Updated your Pikachu sketch! 🎯 Catchable until <t:"), update_text
     print("header/confirmation OK: both name the Pokemon via the shared display-name helper")
 
     # Issue 2: grace-window cutoff is a pure guild-local date comparison.
@@ -779,11 +782,21 @@ async def main() -> None:
 
     await db.dispose()
 
-    # Submit-vs-catch window visual: format_duration_label / duration_bar / the
-    # /submit confirmation's live catch-window label+bar.
+    # Submit-vs-catch window visual: format_duration_label / discord_timestamp
+    # (Discord's live self-updating <t:UNIX:R> markdown) / the thread-opening
+    # window summaries / the /submit confirmation's live catch deadline.
+    from datetime import UTC as _UTC
+    from datetime import date as _date2
+    from datetime import datetime as _datetime
+    from datetime import timedelta as _timedelta2
+
     from pokesketch.cogs.submissions import _submission_confirmation
-    from pokesketch.daily import _window_summary_line
-    from pokesketch.pokebox import duration_bar, format_duration_label
+    from pokesketch.daily import (
+        _submit_deadline_utc,
+        _wild_encounter_window_summary_line,
+        _window_summary_line,
+    )
+    from pokesketch.pokebox import discord_timestamp, format_duration_label
 
     assert format_duration_label(4) == "4h", format_duration_label(4)
     assert format_duration_label(24) == "1d", format_duration_label(24)
@@ -791,36 +804,50 @@ async def main() -> None:
     assert format_duration_label(168) == "7d", format_duration_label(168)
     print("format_duration_label OK: 4h/1d/2d/7d")
 
-    # duration_bar: 0 -> empty, full -> fully filled, small-but-nonzero -> at
-    # least 1 filled cell (never renders a real window as fully empty).
-    assert duration_bar(0, 24) == "[" + "░" * 10 + "]", duration_bar(0, 24)
-    assert duration_bar(24, 24) == "[" + "█" * 10 + "]", duration_bar(24, 24)
-    small_bar = duration_bar(1, 168)
-    assert small_bar.count("█") == 1, small_bar
-    print(f"duration_bar OK: empty={duration_bar(0, 24)}, full={duration_bar(24, 24)}, small={small_bar}")
+    # discord_timestamp: renders the Discord <t:UNIX:style> markdown against a
+    # known epoch, default style "R" (dynamic relative countdown).
+    known_dt = _datetime(2026, 1, 1, 0, 0, 0)
+    known_epoch = int(known_dt.replace(tzinfo=_UTC).timestamp())
+    assert discord_timestamp(known_dt) == f"<t:{known_epoch}:R>", discord_timestamp(known_dt)
+    assert discord_timestamp(known_dt, style="F") == f"<t:{known_epoch}:F>", discord_timestamp(known_dt, style="F")
+    print(f"discord_timestamp OK: {discord_timestamp(known_dt)}")
 
-    # Equal-windows degenerate case: catch_window_hours == grace_period_days*24
-    # must render as a fully-filled bar and matching-unit labels (no implied gap).
-    equal_line = _window_summary_line(grace_period_days=7, catch_window_hours=168)
-    assert "Submit window: 7d" in equal_line, equal_line
-    assert "Catch window: 7d" in equal_line, equal_line
-    assert "█" * 10 in equal_line, equal_line
-    print("window summary OK: equal submit/catch windows render as a fully-filled bar")
+    # _submit_deadline_utc: cutoff is the guild-local midnight grace_period_days+1
+    # days after the daily's local_date (i.e. the first midnight /submit rejects).
+    utc_tz_deadline = _submit_deadline_utc(_date2(2026, 9, 1), grace_period_days=7, tz_name="UTC")
+    assert utc_tz_deadline == _datetime(2026, 9, 9, 0, 0, 0), utc_tz_deadline
+    ny_tz_deadline = _submit_deadline_utc(_date2(2026, 9, 1), grace_period_days=0, tz_name="America/New_York")
+    # America/New_York midnight Sep 2 (EDT, UTC-4) == 04:00 UTC Sep 2.
+    assert ny_tz_deadline == _datetime(2026, 9, 2, 4, 0, 0), ny_tz_deadline
+    print(f"submit deadline OK: UTC={utc_tz_deadline}, NY={ny_tz_deadline}")
 
-    default_line = _window_summary_line(grace_period_days=7, catch_window_hours=23)
-    assert "Submit window: 7d" in default_line, default_line
-    assert "Catch window: 23h" in default_line, default_line
-    print(f"window summary OK (default config): {default_line.splitlines()[0]}")
+    # Thread-opening window summaries: live self-updating deadline for /submit,
+    # duration label (not a stale countdown) for the per-submission catch window.
+    daily_line = _window_summary_line(_date2(2026, 9, 1), grace_period_days=7, catch_window_hours=24, tz_name="UTC")
+    assert "`/submit` closes for this thread <t:" in daily_line, daily_line
+    assert "catchable via `/catch` for 1d" in daily_line, daily_line
+    print(f"daily window summary OK: {daily_line}")
 
-    confirmation = _submission_confirmation("Pikachu", True, " (+15 EXP)", 23)
+    equal_line = _window_summary_line(_date2(2026, 9, 1), grace_period_days=7, catch_window_hours=168, tz_name="UTC")
+    assert "catchable via `/catch` for 7d" in equal_line, equal_line
+    print("daily window summary OK: equal submit/catch windows both render in day units")
+
+    wild_line = _wild_encounter_window_summary_line(_date2(2026, 9, 1), catch_window_hours=24, tz_name="UTC")
+    assert "only works here until <t:" in wild_line, wild_line
+    assert "today only, no backfill" in wild_line, wild_line
+    print(f"wild-encounter window summary OK: {wild_line}")
+
+    # /submit confirmation: catch deadline is a live Discord timestamp computed
+    # from the submission's own created_at + catch_window_hours.
+    created_at = _datetime(2026, 9, 1, 12, 0, 0)
+    expected_epoch = int((created_at + _timedelta2(hours=24)).replace(tzinfo=_UTC).timestamp())
+    confirmation = _submission_confirmation("Pikachu", True, " (+15 EXP)", created_at + _timedelta2(hours=24))
     assert "Pikachu submitted (+15 EXP)!" in confirmation, confirmation
-    assert "Catchable for 23h" in confirmation, confirmation
-    assert "█" * 10 in confirmation, confirmation  # just-submitted: full bar
+    assert f"<t:{expected_epoch}:R>" in confirmation, confirmation
     print(f"submission confirmation OK: {confirmation}")
 
-    update_confirmation = _submission_confirmation("Bulbasaur", False, "", 168)
+    update_confirmation = _submission_confirmation("Bulbasaur", False, "", created_at + _timedelta2(hours=168))
     assert "Updated your Bulbasaur sketch!" in update_confirmation, update_confirmation
-    assert "Catchable for 7d" in update_confirmation, update_confirmation
     print(f"submission update confirmation OK: {update_confirmation}")
 
     # /help: EXP explainer should always reflect the live leveling constants
