@@ -27,6 +27,10 @@ MAX_ACTIVE = 6
 MAX_TOTAL = 20
 TOTAL_DEX = 1025
 
+# New players start with this many pokeballs (set at wallet creation, not the
+# weekly grant) so they can /catch immediately without waiting for Monday.
+STARTER_POKEBALLS = 5
+
 # Cached party/box images are downsized to fit within this box (aspect
 # preserved, never upscaled) to keep data/party_cache/ bounded regardless
 # of how large the original Discord attachment was.
@@ -53,7 +57,7 @@ class CatchError(Exception):
 async def get_or_create_wallet(s, user_id: int) -> PokeballWallet:
     wallet = await s.get(PokeballWallet, user_id)
     if wallet is None:
-        wallet = PokeballWallet(user_id=user_id)
+        wallet = PokeballWallet(user_id=user_id, balance=STARTER_POKEBALLS)
         s.add(wallet)
         await s.flush()
     return wallet

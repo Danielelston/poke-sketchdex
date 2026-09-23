@@ -189,6 +189,10 @@ async def main() -> None:
         await s.commit()
     try:
         async with db.session() as s:
+            # New wallets now start with STARTER_POKEBALLS; drain it first so this
+            # exercises the actual zero-balance error path.
+            wallet = await pokebox.get_or_create_wallet(s, empty_uid)
+            wallet.balance = 0
             await pokebox.catch_todays_submission(s, empty_uid, party_dir)
             await s.commit()
         raise AssertionError("expected CatchError for no pokeballs")
