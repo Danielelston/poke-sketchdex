@@ -290,8 +290,9 @@ class WeeklyVote(Base):
 
     Phase 1 (category): category_poll_message_id posted -> category set once
     the poll closes. Phase 2 (choice): choice_poll_message_id posted -> once
-    that closes, resolved_dex_pool + thread_id are stamped and the
-    wild-encounter thread goes live. Any of the poll/choice fields may be
+    that closes, resolved_dex_pool is cached and the pool is ready to serve
+    daily wild-encounter posts (each with its own fresh thread — see
+    WildEncounter.thread_id). Any of the poll/choice fields may be
     null while a cycle is still in progress.
     """
 
@@ -310,7 +311,6 @@ class WeeklyVote(Base):
     choice_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Newline-joined dex numbers, cached once day-2 resolves.
     resolved_dex_pool: Mapped[str | None] = mapped_column(String, nullable=True)
-    thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     wild_encounters: Mapped[list[WildEncounter]] = relationship(
@@ -402,12 +402,12 @@ class HabitatPool(Base):
 
 class WildEncounter(Base):
     """The Pokemon posted into a guild's wild-encounter thread on a given local
-    date — the wild-encounter counterpart of `DailyPokemon`. One row per guild
-    per day the thread got a fresh random pick from that week's
-    `WeeklyVote.resolved_dex_pool`. Not part of the design doc's explicit table
-    list, but required to give `/submit` something to point at (mirrors how
-    `DailyPokemon` anchors the main daily thread's submissions) — see the
-    "Same `WildEncounter` row shape as originally planned" note in the doc.
+    date — the wild-encounter counterpart of `DailyPokemon`. One row (and one
+    fresh thread) per guild per day, created immediately after that day's main
+    daily post, from that week's `WeeklyVote.resolved_dex_pool`. Not part of
+    the design doc's explicit table list, but required to give `/submit`
+    something to point at (mirrors how `DailyPokemon` anchors the main daily
+    thread's submissions).
     """
 
     __tablename__ = "wild_encounters"
@@ -422,6 +422,9 @@ class WildEncounter(Base):
     dex_no: Mapped[int] = mapped_column(Integer)
     name: Mapped[str] = mapped_column(String(64))
     message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Each day gets its own fresh companion thread (one Pokemon per thread),
+    # created right after the day's announcement message.
+    thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     weekly_vote: Mapped[WeeklyVote] = relationship(back_populates="wild_encounters")

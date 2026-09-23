@@ -71,8 +71,9 @@ class Help(commands.Cog):
                 "Sketch it, post your art in that day's thread with `/submit`, and react 👍 "
                 "on entries you like.\n\n"
                 "Each week, players also vote in two stages (category, then a specific choice) "
-                "for a wild-encounter theme — a separate, optional thread that gets a fresh random "
-                "Pokémon daily. `/submit` works there too."
+                "for a wild-encounter theme. Once that's decided, a fresh wild-encounter thread "
+                "gets posted daily alongside the main challenge — its own Pokémon, its own thread "
+                "each day. `/submit` works there too."
             ),
             color=0x5865F2,
         )
