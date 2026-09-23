@@ -9,7 +9,8 @@ submission messages.
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
@@ -17,10 +18,25 @@ from discord.ext import commands
 from sqlalchemy import func, select
 
 from .. import db, leveling, pokebox
+from ..formatting import species_display_name
 
 log = logging.getLogger(__name__)
 
 UPVOTE_EMOJI = "👍"
+
+
+def _submission_header(display_name: str, user_mention: str) -> str:
+    return f"🖼️ {display_name} by {user_mention} — react {UPVOTE_EMOJI} to upvote!"
+
+
+def _submission_confirmation(display_name: str, first_time: bool, exp_msg: str) -> str:
+    if first_time:
+        return f"✅ {display_name} submitted{exp_msg}!"
+    return f"✅ Updated your {display_name} sketch!"
+
+
+def _is_outside_grace_window(daily_local_date: date, today_local: date, grace_period_days: int) -> bool:
+    return daily_local_date < today_local - timedelta(days=grace_period_days)
 
 
 async def _get_or_create_user(s, guild_id: int, user_id: int) -> db.User:
@@ -94,6 +110,20 @@ class Submissions(commands.Cog):
                 )
                 return
 
+            cfg = await s.get(db.GuildConfig, gid)
+            grace_period_days = cfg.grace_period_days if cfg else 7
+            tz = cfg.timezone if cfg else "UTC"
+            today_local = datetime.now(ZoneInfo(tz)).date()
+            if _is_outside_grace_window(daily.local_date, today_local, grace_period_days):
+                await interaction.followup.send(
+                    f"This thread's Pokémon is outside the {grace_period_days}-day submission "
+                    "window and can no longer accept new sketches.",
+                    ephemeral=True,
+                )
+                return
+
+            display_name = species_display_name(daily.name)
+
             # One submission per user per day (updates image if re-submitting).
             existing = (
                 await s.execute(
@@ -104,7 +134,7 @@ class Submissions(commands.Cog):
             ).scalar_one_or_none()
 
             posted = await channel.send(
-                content=f"🖼️ Sketch by {interaction.user.mention} — react {UPVOTE_EMOJI} to upvote!",
+                content=_submission_header(display_name, interaction.user.mention),
                 file=await image.to_file(),
             )
             await posted.add_reaction(UPVOTE_EMOJI)
@@ -143,7 +173,7 @@ class Submissions(commands.Cog):
             await s.commit()
 
         await interaction.followup.send(
-            f"✅ Sketch submitted{exp_msg}!" if first_time else "✅ Updated your sketch!",
+            _submission_confirmation(display_name, first_time, exp_msg),
             ephemeral=True,
         )
 

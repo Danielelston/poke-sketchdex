@@ -18,6 +18,21 @@ log = logging.getLogger(__name__)
 
 SHINY_CHANCE = 1 / 40  # ~2.5% chance the daily reference is shiny
 
+# Discord's actual supported auto-archive tiers, in minutes (1h/1d/3d/1wk) — no
+# arbitrary durations are allowed, so grace_period_days must snap to one of these.
+ARCHIVE_DURATION_TIERS = (60, 1440, 4320, 10080)
+
+
+def _archive_duration_for_grace(grace_period_days: int) -> int:
+    """Smallest Discord archive tier >= grace_period_days * 1440 minutes, capped
+    at the largest tier (10080 = 1 week). Default 7 days -> 10080 exactly, so
+    nothing changes visually for guilds left at the default grace period."""
+    target = grace_period_days * 1440
+    for tier in ARCHIVE_DURATION_TIERS:
+        if tier >= target:
+            return tier
+    return ARCHIVE_DURATION_TIERS[-1]
+
 
 async def post_daily_for_guild(
     client: discord.Client,
@@ -44,6 +59,7 @@ async def post_daily_for_guild(
             return False
         channel_id, role_id = cfg.channel_id, cfg.role_id
         dex_min, dex_max, mode = cfg.dex_min, cfg.dex_max, cfg.selection_mode
+        grace_period_days = cfg.grace_period_days
 
     dex_no = await pick_dex_no(guild_id, dex_min, dex_max, mode)
     ref = await api.get_pokemon(dex_no)
@@ -70,7 +86,7 @@ async def post_daily_for_guild(
     try:
         thread = await msg.create_thread(
             name=f"{local_date.isoformat()} — {ref.display_name()}",
-            auto_archive_duration=1440,
+            auto_archive_duration=_archive_duration_for_grace(grace_period_days),
         )
         await thread.send(
             "Post your sketches here with `/submit`! You can also chat about "

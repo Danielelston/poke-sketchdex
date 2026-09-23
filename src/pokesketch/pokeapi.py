@@ -13,6 +13,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from .formatting import species_display_name
+
 log = logging.getLogger(__name__)
 
 POKEAPI_BASE = "https://pokeapi.co/api/v2"
@@ -30,7 +32,7 @@ class PokemonRef:
     shiny_sprite: str | None
 
     def display_name(self) -> str:
-        return self.name.replace("-", " ").title()
+        return species_display_name(self.name)
 
     def reference_images(self, shiny: bool = False) -> list[str]:
         """Return 1-2 reference image URLs (official art first, then sprite)."""
