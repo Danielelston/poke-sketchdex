@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, available_timezones
 import discord
 from discord import app_commands
 from discord.ext import commands
+from sqlalchemy import select
 
 from .. import db
 from ..daily import post_daily_for_guild
@@ -23,6 +24,38 @@ _ALL_TZ = available_timezones()
 
 GRACE_PERIOD_MIN_DAYS = 1
 GRACE_PERIOD_MAX_DAYS = 30
+
+MIN_DEX_NO = 1
+MAX_DEX_NO = 1025
+
+WEEKDAY_CHOICES = [
+    app_commands.Choice(name="Monday", value=0),
+    app_commands.Choice(name="Tuesday", value=1),
+    app_commands.Choice(name="Wednesday", value=2),
+    app_commands.Choice(name="Thursday", value=3),
+    app_commands.Choice(name="Friday", value=4),
+    app_commands.Choice(name="Saturday", value=5),
+    app_commands.Choice(name="Sunday", value=6),
+]
+
+
+def _parse_dex_numbers(raw: str) -> list[int]:
+    """Parse a free-form space/comma-separated dex number list for
+    /event-create. Raises ValueError with a user-facing message on any bad
+    token, out-of-range number, or an empty result."""
+    tokens = [t for t in re.split(r"[,\s]+", raw.strip()) if t]
+    if not tokens:
+        raise ValueError("Provide at least one dex number.")
+    seen: list[int] = []
+    for tok in tokens:
+        if not tok.isdigit():
+            raise ValueError(f"`{tok}` isn't a valid dex number.")
+        n = int(tok)
+        if not (MIN_DEX_NO <= n <= MAX_DEX_NO):
+            raise ValueError(f"`{tok}` is out of range (must be {MIN_DEX_NO}-{MAX_DEX_NO}).")
+        if n not in seen:
+            seen.append(n)
+    return seen
 
 
 def _validate_grace_period(days: int) -> bool:
@@ -88,11 +121,13 @@ class Admin(commands.Cog):
             cfg.role_id = role.id
             cfg.post_time = time
             cfg.timezone = timezone
+            vote_day1_weekday = cfg.vote_day1_weekday
             await s.commit()
             if await s.get(db.GuildStats, gid) is None:
                 s.add(db.GuildStats(guild_id=gid))
                 await s.commit()
         self.bot.reschedule_guild(gid, time, timezone)
+        self.bot.reschedule_guild_votes(gid, vote_day1_weekday, time, timezone)
         await interaction.response.send_message(
             f"✅ Daily posts set in {channel.mention}, pinging {role.mention} at "
             f"**{time} {timezone}**.",
@@ -269,6 +304,124 @@ class Admin(commands.Cog):
             ),
             view=None,
         )
+
+    # --- Weekly vote & wild encounters ---
+
+    @app_commands.command(
+        name="set-vote-day",
+        description="Set the weekday the weekly wild-encounter category vote posts (day 2 is always the next day).",
+    )
+    @app_commands.describe(weekday="Weekday the category vote posts")
+    @app_commands.choices(weekday=WEEKDAY_CHOICES)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def set_vote_day(self, interaction: discord.Interaction, weekday: app_commands.Choice[int]) -> None:
+        gid = interaction.guild_id
+        async with db.session() as s:
+            cfg = await s.get(db.GuildConfig, gid)
+            if cfg is None:
+                await interaction.response.send_message("Run `/setup` first.", ephemeral=True)
+                return
+            cfg.vote_day1_weekday = weekday.value
+            post_time, tz = cfg.post_time, cfg.timezone
+            await s.commit()
+        self.bot.reschedule_guild_votes(gid, weekday.value, post_time, tz)
+        await interaction.response.send_message(
+            f"✅ Weekly category vote now posts **{weekday.name}** (specific-choice vote the day after, "
+            "resolution the day after that).",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="event-create", description="Create an admin-authored wild-encounter Event.")
+    @app_commands.describe(
+        name="Event name, e.g. 'Eeveelution Week'",
+        dex_numbers="Space or comma-separated dex numbers, e.g. '133 134 135 136 196 197 470 471'",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def event_create(self, interaction: discord.Interaction, name: str, dex_numbers: str) -> None:
+        try:
+            dex_list = _parse_dex_numbers(dex_numbers)
+        except ValueError as exc:
+            await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+            return
+        async with db.session() as s:
+            s.add(
+                db.EventDefinition(
+                    guild_id=interaction.guild_id,
+                    name=name,
+                    dex_list="\n".join(str(n) for n in dex_list),
+                    created_by=interaction.user.id,
+                )
+            )
+            await s.commit()
+        await interaction.response.send_message(
+            f"✅ Created event **{name}** with {len(dex_list)} Pokemon. "
+            "It'll appear on the day-1 vote ballot from next week.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="event-list", description="List this server's wild-encounter Events.")
+    async def event_list(self, interaction: discord.Interaction) -> None:
+        async with db.session() as s:
+            events = (
+                await s.execute(
+                    select(db.EventDefinition)
+                    .where(db.EventDefinition.guild_id == interaction.guild_id)
+                    .order_by(db.EventDefinition.is_active.desc(), db.EventDefinition.name)
+                )
+            ).scalars().all()
+        if not events:
+            await interaction.response.send_message(
+                "No events yet — create one with `/event-create`.", ephemeral=True
+            )
+            return
+        lines = [
+            f"{'🟢' if e.is_active else '⚪'} **{e.name}** — {len(e.dex_numbers)} Pokemon"
+            for e in events
+        ]
+        embed = discord.Embed(
+            title="🎉 Wild-Encounter Events", description="\n".join(lines), color=0x5865F2
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _active_event_name_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        async with db.session() as s:
+            events = (
+                await s.execute(
+                    select(db.EventDefinition.name).where(
+                        db.EventDefinition.guild_id == interaction.guild_id, db.EventDefinition.is_active
+                    )
+                )
+            ).scalars().all()
+        cur = current.lower()
+        return [
+            app_commands.Choice(name=n, value=n) for n in events if cur in n.lower()
+        ][:25]
+
+    @app_commands.command(name="event-disable", description="Disable a wild-encounter Event without deleting it.")
+    @app_commands.describe(name="Event name to disable")
+    @app_commands.autocomplete(name=_active_event_name_autocomplete)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def event_disable(self, interaction: discord.Interaction, name: str) -> None:
+        async with db.session() as s:
+            event = (
+                await s.execute(
+                    select(db.EventDefinition).where(
+                        db.EventDefinition.guild_id == interaction.guild_id,
+                        db.EventDefinition.name == name,
+                        db.EventDefinition.is_active,
+                    )
+                )
+            ).scalar_one_or_none()
+            if event is None:
+                await interaction.response.send_message(
+                    f"No active event named **{name}**.", ephemeral=True
+                )
+                return
+            event.is_active = False
+            await s.commit()
+        await interaction.response.send_message(f"✅ Disabled event **{name}**.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
