@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from discord.ext import commands
 from sqlalchemy import select
 
-from . import db, pokebox, weeklyvote
+from . import db, gym, pokebox, weeklyvote
 from .config import Config
 from .daily import post_daily_for_guild, post_wild_encounter_for_guild
 from .default_events import seed_default_events
@@ -25,10 +25,12 @@ INITIAL_EXTENSIONS = [
     "pokesketch.cogs.submissions",
     "pokesketch.cogs.collection",
     "pokesketch.cogs.stats",
+    "pokesketch.cogs.gym",
     "pokesketch.cogs.help",
 ]
 
 WEEKLY_POKEBALL_JOB_ID = "weekly-pokeball-grant"
+GYM_EXPIRY_JOB_ID = "gym-expiry-check"
 
 
 class PokeSketchDexBot(commands.Bot):
@@ -56,6 +58,7 @@ class PokeSketchDexBot(commands.Bot):
 
         await self._schedule_all_guilds()
         self._schedule_weekly_pokeball_grant()
+        self._schedule_gym_expiry_check()
         self.scheduler.start()
 
     async def _sync_all_joined_guilds(self) -> None:
@@ -207,6 +210,29 @@ class PokeSketchDexBot(commands.Bot):
             log.info("Weekly pokeball grant: %d users granted.", granted)
         except Exception:  # noqa: BLE001 - never let a job kill the scheduler
             log.exception("Weekly pokeball grant job failed")
+
+    def _schedule_gym_expiry_check(self) -> None:
+        """Global (not per-guild) daily tick that closes any guild's active
+        GymEvent whose ends_at has passed — daily granularity is enough per
+        the design doc's locked timeout behavior (no badge on expiry)."""
+        self.scheduler.add_job(
+            self._run_gym_expiry_job,
+            CronTrigger(hour=0, minute=10, timezone=ZoneInfo("UTC")),
+            id=GYM_EXPIRY_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        log.info("Scheduled gym expiry check (daily 00:10 UTC).")
+
+    async def _run_gym_expiry_job(self) -> None:
+        try:
+            async with db.session() as s:
+                expired = await gym.close_expired_gym_events(s)
+                await s.commit()
+            if expired:
+                log.info("Gym expiry check: %d event(s) expired.", len(expired))
+        except Exception:  # noqa: BLE001 - never let a job kill the scheduler
+            log.exception("Gym expiry check job failed")
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, getattr(self.user, "id", "?"))

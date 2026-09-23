@@ -468,3 +468,63 @@ class WildEncounterSubmission(Base):
     def is_shiny(self) -> bool:
         # No shiny mechanic for wild encounters in v1.
         return False
+
+
+class GymEvent(Base):
+    """Admin-run, time-boxed community goal: a named leader with an HP pool
+    that player contributions chip away at during the event window.
+
+    Only one `active` GymEvent per guild at a time — enforced at the
+    application level (see cogs/gym.py's /gym start), not a DB constraint.
+    """
+
+    __tablename__ = "gym_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    leader_name: Mapped[str] = mapped_column(String(128))
+    hp_total: Mapped[int] = mapped_column(Integer)
+    hp_remaining: Mapped[int] = mapped_column(Integer)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # "active" | "defeated" | "expired" | "cancelled"
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    badge_name: Mapped[str] = mapped_column(String(128))
+    channel_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_by: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class GymContribution(Base):
+    """Append-only audit log of gym-damage contributions, same pattern as `ExpEvent`."""
+
+    __tablename__ = "gym_contributions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    gym_event_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("gym_events.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    # "submit" | "upvote_given" | "upvote_received"
+    kind: Mapped[str] = mapped_column(String(32))
+    damage: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class GymBadge(Base):
+    """Event trophy: one per player per defeated gym.
+
+    Separate table from any future cosmetic level-based rank badges — see
+    the design doc's decision on why these must never share a table.
+    """
+
+    __tablename__ = "gym_badges"
+    __table_args__ = (UniqueConstraint("gym_event_id", "user_id", name="uq_gymbadge_event_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    gym_event_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("gym_events.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    awarded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
