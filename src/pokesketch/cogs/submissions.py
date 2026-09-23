@@ -29,10 +29,9 @@ def _submission_header(display_name: str, user_mention: str) -> str:
     return f"🖼️ {display_name} by {user_mention} — react {UPVOTE_EMOJI} to upvote!"
 
 
-def _submission_confirmation(display_name: str, first_time: bool, exp_msg: str, catch_window_hours: int) -> str:
-    catch_label = pokebox.format_duration_label(catch_window_hours)
-    bar = pokebox.duration_bar(catch_window_hours, catch_window_hours)  # just started: full bar
-    catch_suffix = f" 🎯 {bar} Catchable for {catch_label}."
+def _submission_confirmation(display_name: str, first_time: bool, exp_msg: str, catch_expires_at: datetime) -> str:
+    deadline = pokebox.discord_timestamp(catch_expires_at, style="R")
+    catch_suffix = f" 🎯 Catchable until {deadline}."
     if first_time:
         return f"✅ {display_name} submitted{exp_msg}!{catch_suffix}"
     return f"✅ Updated your {display_name} sketch!{catch_suffix}"
@@ -214,7 +213,9 @@ class Submissions(commands.Cog):
             total = await self._award_submission_rewards(s, gid, uid, daily.local_date, leveling.EXP_SUBMIT, "submit")
             exp_msg = f" (+{total} EXP)"
 
-        return _submission_confirmation(display_name, first_time, exp_msg, catch_window_hours), exp_msg
+        return _submission_confirmation(
+            display_name, first_time, exp_msg, sub.created_at + timedelta(hours=catch_window_hours)
+        ), exp_msg
 
     async def _submit_to_wild_encounter(
         self,
@@ -269,7 +270,9 @@ class Submissions(commands.Cog):
             )
             exp_msg = f" (+{total} EXP)"
 
-        return _submission_confirmation(display_name, first_time, exp_msg, catch_window_hours), exp_msg
+        return _submission_confirmation(
+            display_name, first_time, exp_msg, sub.created_at + timedelta(hours=catch_window_hours)
+        ), exp_msg
 
     @staticmethod
     async def _award_submission_rewards(s, gid: int, uid: int, submit_date: date, base_exp: int, kind: str) -> int:

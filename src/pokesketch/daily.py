@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import date
+from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import discord
 from sqlalchemy import select
@@ -34,19 +35,49 @@ def _archive_duration_for_grace(grace_period_days: int) -> int:
     return ARCHIVE_DURATION_TIERS[-1]
 
 
-def _window_summary_line(grace_period_days: int, catch_window_hours: int) -> str:
-    """Static, non-stale summary of the two configured windows for a thread's
-    opening post: states durations (\"24h per sketch\"), never a countdown, so
-    it stays accurate for the life of the thread regardless of when it's read.
-    The bar shows the catch window as a fraction of the submit window (equal
-    windows render as a fully-filled bar, correctly implying no gap)."""
-    grace_hours = grace_period_days * 24
-    bar = pokebox.duration_bar(catch_window_hours, grace_hours)
-    submit_label = pokebox.format_duration_label(grace_hours)
+def _submit_deadline_utc(local_date: date, grace_period_days: int, tz_name: str) -> datetime:
+    """First guild-local midnight at/after which /submit for this thread's
+    daily is rejected (see _is_outside_grace_window in submissions.py — it's
+    a pure date comparison, so the cutoff is always a guild-local midnight,
+    never a sub-day time). Returned as naive-UTC to match this project's
+    DB-datetime convention (see pokebox._naive_utcnow)."""
+    tz = ZoneInfo(tz_name)
+    cutoff_local_date = local_date + timedelta(days=grace_period_days + 1)
+    cutoff_local_midnight = datetime.combine(cutoff_local_date, time.min, tzinfo=tz)
+    return cutoff_local_midnight.astimezone(UTC).replace(tzinfo=None)
+
+
+def _window_summary_line(local_date: date, grace_period_days: int, catch_window_hours: int, tz_name: str) -> str:
+    """Live, self-updating summary of the two windows for a daily thread's
+    opening post, using Discord's <t:UNIX:R> markdown (renders client-side and
+    keeps ticking with no bot-side re-editing needed — see the Obsidian design
+    doc for why a static ASCII bar was rejected: it can't reflect elapsed time).
+    The submit deadline is a concrete guild-local-midnight cutoff for this
+    specific thread; the catch window is stated as a duration since it's
+    reset fresh by each individual /submit, not a single thread-wide deadline."""
+    submit_deadline = pokebox.discord_timestamp(
+        _submit_deadline_utc(local_date, grace_period_days, tz_name), style="R"
+    )
     catch_label = pokebox.format_duration_label(catch_window_hours)
     return (
-        f"⏳ Submit window: {submit_label} • Catch window: {catch_label} per sketch\n"
-        f"{bar} catch window = first {catch_label} of the {submit_label} submit window"
+        f"⏳ `/submit` closes for this thread {submit_deadline} • "
+        f"each sketch is then catchable via `/catch` for {catch_label} from when it's submitted."
+    )
+
+
+def _wild_encounter_window_summary_line(local_date: date, catch_window_hours: int, tz_name: str) -> str:
+    """Same idea as _window_summary_line, but wild-encounter threads have no
+    grace-period backfill at all: /submit only accepts same-guild-local-day
+    submissions (see _find_wild_encounter_for_thread in submissions.py), so
+    the submit deadline is simply the next guild-local midnight, not a
+    grace_period_days-based cutoff."""
+    submit_deadline = pokebox.discord_timestamp(
+        _submit_deadline_utc(local_date, grace_period_days=0, tz_name=tz_name), style="R"
+    )
+    catch_label = pokebox.format_duration_label(catch_window_hours)
+    return (
+        f"⏳ `/submit` only works here until {submit_deadline} (today only, no backfill) • "
+        f"each sketch is then catchable via `/catch` for {catch_label} from when it's submitted."
     )
 
 
@@ -77,6 +108,7 @@ async def post_daily_for_guild(
         dex_min, dex_max, mode = cfg.dex_min, cfg.dex_max, cfg.selection_mode
         grace_period_days = cfg.grace_period_days
         catch_window_hours = cfg.catch_window_hours
+        tz_name = cfg.timezone
 
     dex_no = await pick_dex_no(guild_id, dex_min, dex_max, mode)
     ref = await api.get_pokemon(dex_no)
@@ -108,7 +140,7 @@ async def post_daily_for_guild(
         await thread.send(
             "Post your sketches here with `/submit`! You can also chat about "
             "today's Pokemon. React 👍 to upvote entries.\n"
-            f"{_window_summary_line(grace_period_days, catch_window_hours)}"
+            f"{_window_summary_line(local_date, grace_period_days, catch_window_hours, tz_name)}"
         )
     except discord.DiscordException as exc:
         log.warning("Guild %s: could not create thread: %s", guild_id, exc)
@@ -167,8 +199,8 @@ async def post_wild_encounter_for_guild(
         if existing is not None:
             return False  # idempotent: already posted today
         channel_id, weekly_vote_id = cfg.channel_id, wv.id
-        grace_period_days = cfg.grace_period_days
         catch_window_hours = cfg.catch_window_hours
+        tz_name = cfg.timezone
 
     dex_no = random.choice(dex_pool)
     ref = await api.get_pokemon(dex_no)
@@ -194,7 +226,7 @@ async def post_wild_encounter_for_guild(
         )
         await thread.send(
             "Sketch it with `/submit`!\n"
-            f"{_window_summary_line(grace_period_days, catch_window_hours)}"
+            f"{_wild_encounter_window_summary_line(local_date, catch_window_hours, tz_name)}"
         )
     except discord.DiscordException as exc:
         log.warning("Guild %s: could not create wild-encounter thread: %s", guild_id, exc)
