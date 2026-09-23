@@ -472,12 +472,18 @@ async def main() -> None:
     print("event dex-number parser OK: valid parsed+deduped, bad input rejected cleanly")
 
     class _FakeSentMessage:
-        def __init__(self, msg_id: int, url: str):
+        def __init__(self, msg_id: int, url: str, thread=None):
             self.id = msg_id
             self.attachments = [type("Attachment", (), {"url": url})()]
+            self._thread = thread
+            self.created_threads: list[dict] = []
 
         async def add_reaction(self, emoji):
             pass
+
+        async def create_thread(self, **kwargs):
+            self.created_threads.append(kwargs)
+            return self._thread
 
     class _FakeThread:
         def __init__(self, thread_id: int):
@@ -499,7 +505,7 @@ async def main() -> None:
             return self._thread
 
         async def send(self, *args, **kwargs):
-            return _FakeSentMessage(60000, "https://example.invalid/poll.png")
+            return _FakeSentMessage(60000, "https://example.invalid/poll.png", thread=self._thread)
 
     class _FakeClient:
         def __init__(self, channels: dict[int, object]):
@@ -563,7 +569,8 @@ async def main() -> None:
     print("day-2 candidates/resolution OK: event choices + generation dex range both correct")
 
     # Fake category winner ("event") -> fake choice winner ("Eeveelution Week") -> resolved
-    # dex pool -> thread creation, via the real day-2-resolution finalize path (network faked).
+    # dex pool, via the real day-2-resolution finalize path (network faked). Thread creation
+    # now happens per-day in post_wild_encounter_for_guild, not here.
     async with db.session() as s:
         wv = db.WeeklyVote(guild_id=vote_gid, iso_week=pokebox.week_key(), category="event")
         s.add(wv)
@@ -578,22 +585,22 @@ async def main() -> None:
     assert ok, "expected _finalize_weekly_vote to succeed"
     async with db.session() as s:
         wv = await s.get(db.WeeklyVote, weekly_vote_id)
-    assert wv.thread_id == vote_thread_id, wv.thread_id
     assert wv.dex_pool_numbers == [133, 134, 135, 136], wv.dex_pool_numbers
-    assert fake_channel.created_threads, "expected create_thread to be called"
-    print("weekly vote resolution OK: event/choice -> resolved dex pool -> wild-encounter thread created")
+    print("weekly vote resolution OK: event/choice -> resolved dex pool cached (no thread yet)")
 
-    # get_active_weekly_vote: "most recent WeeklyVote with a non-null thread_id" — a newer,
-    # still-in-progress cycle (no thread yet) must NOT shadow the still-active previous one,
-    # so wild encounters keep posting with no gap while the new week's votes are in flight.
+    # get_active_weekly_vote: "most recent WeeklyVote with a resolved dex pool" — a newer,
+    # still-in-progress cycle (no resolved pool yet) must NOT shadow the still-active previous
+    # one, so wild encounters keep posting with no gap while the new week's votes are in flight.
     async with db.session() as s:
-        s.add(db.WeeklyVote(guild_id=vote_gid, iso_week="2099-W01", category="type"))  # in-progress, no thread yet
+        s.add(db.WeeklyVote(guild_id=vote_gid, iso_week="2099-W01", category="type"))  # in-progress, unresolved
         await s.commit()
         active = await weeklyvote.get_active_weekly_vote(s, vote_gid)
     assert active.id == weekly_vote_id, (active.id, weekly_vote_id)
-    print("cutover OK: in-progress new cycle doesn't shadow the still-active previous thread")
+    print("cutover OK: in-progress new cycle doesn't shadow the still-active previous pool")
 
-    # Daily wild-encounter post: real post_wild_encounter_for_guild, network faked.
+    # Daily wild-encounter post: real post_wild_encounter_for_guild, network faked. Each call
+    # creates its OWN fresh thread (one Pokemon per thread), posted into the guild's main channel
+    # right alongside the main daily post.
     from pokesketch.daily import post_wild_encounter_for_guild
 
     posted = await post_wild_encounter_for_guild(fake_client, _FakeApi(), vote_gid, today)
@@ -607,10 +614,14 @@ async def main() -> None:
             )
         ).scalar_one()
     assert we.dex_no in (133, 134, 135, 136), we.dex_no
+    assert we.thread_id == vote_thread_id, we.thread_id  # fake channel always hands back the same fake thread
     we_id = we.id
     again = await post_wild_encounter_for_guild(fake_client, _FakeApi(), vote_gid, today)
     assert not again, "expected the same-day re-post to be a no-op (idempotent)"
-    print(f"wild encounter daily post OK: posted #{we.dex_no}, same-day re-post is idempotent")
+    print(
+        f"wild encounter daily post OK: posted #{we.dex_no} in its own thread {we.thread_id}, "
+        "same-day re-post is idempotent"
+    )
 
     # Wild-encounter /submit: reuses the shared EXP/streak/PokeBox path.
     subs_cog = Submissions(bot=None)
