@@ -4,6 +4,11 @@ from __future__ import annotations
 
 # --- EXP award constants (see design doc EXP model) ---
 EXP_SUBMIT = 10
+# Distinct, smaller than EXP_SUBMIT: the wild-encounter thread is a secondary,
+# optional-alongside-the-main-daily activity (per the Weekly Vote & Wild
+# Encounters plan's open question) — same streak-bonus/upvote rules apply on
+# top of this via the shared streak logic in cogs/submissions.py.
+EXP_WILD_ENCOUNTER = 5
 EXP_PER_STREAK_DAY = 2
 EXP_STREAK_CAP = 20  # max bonus from the streak term
 EXP_PER_UPVOTE = 1

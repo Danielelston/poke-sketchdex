@@ -51,6 +51,10 @@ class GuildConfig(Base):
     # grace_period_days * 24 — enforced by /set-catch-window and re-clamped
     # by /set-grace-period if it's later lowered below this value.
     catch_window_hours: Mapped[int] = mapped_column(Integer, default=24)
+    # Weekday the weekly category vote posts (0=Monday..6=Sunday, Python's
+    # date.weekday() convention). Day 2 (specific-choice vote) is always the
+    # next day and isn't independently configurable. Default Sunday.
+    vote_day1_weekday: Mapped[int] = mapped_column(Integer, default=6)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     dailies: Mapped[list[DailyPokemon]] = relationship(
@@ -141,6 +145,18 @@ class Submission(Base):
     upvotes: Mapped[list[Upvote]] = relationship(
         back_populates="submission", cascade="all, delete-orphan"
     )
+
+    @property
+    def dex_no(self) -> int:
+        return self.daily.dex_no
+
+    @property
+    def species_name(self) -> str:
+        return self.daily.name
+
+    @property
+    def is_shiny(self) -> bool:
+        return self.daily.is_shiny
 
 
 class Upvote(Base):
@@ -257,6 +273,195 @@ class CaughtMon(Base):
     source_submission_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("submissions.id", ondelete="SET NULL"), nullable=True
     )
+    # Wild-encounter counterpart of source_submission_id — a caught mon points
+    # at exactly one of the two (never both), depending which thread type it
+    # was caught from.
+    source_wild_encounter_submission_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("wild_encounter_submissions.id", ondelete="SET NULL"), nullable=True
+    )
     # Reserved for the deferred leveling stretch phase — unused, left at defaults.
     mon_exp: Mapped[int] = mapped_column(Integer, default=0)
     mon_level: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class WeeklyVote(Base):
+    """Per-guild, one row per ISO week: the two-stage category->choice vote
+    that defines the week's wild-encounter Pokemon pool.
+
+    Phase 1 (category): category_poll_message_id posted -> category set once
+    the poll closes. Phase 2 (choice): choice_poll_message_id posted -> once
+    that closes, resolved_dex_pool + thread_id are stamped and the
+    wild-encounter thread goes live. Any of the poll/choice fields may be
+    null while a cycle is still in progress.
+    """
+
+    __tablename__ = "weekly_votes"
+    __table_args__ = (UniqueConstraint("guild_id", "iso_week", name="uq_weeklyvote_guild_week"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    iso_week: Mapped[str] = mapped_column(String(10))  # e.g. "2026-W39"
+    category_poll_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # "location" | "type" | "event" | "habitat" | "generation"
+    category: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    choice_poll_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Category-specific: location-area display name, type name, event name,
+    # habitat display name, or region label.
+    choice_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Newline-joined dex numbers, cached once day-2 resolves.
+    resolved_dex_pool: Mapped[str | None] = mapped_column(String, nullable=True)
+    thread_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    wild_encounters: Mapped[list[WildEncounter]] = relationship(
+        back_populates="weekly_vote", cascade="all, delete-orphan"
+    )
+
+    @property
+    def dex_pool_numbers(self) -> list[int]:
+        if not self.resolved_dex_pool:
+            return []
+        return [int(x) for x in self.resolved_dex_pool.splitlines() if x.strip()]
+
+
+class EventDefinition(Base):
+    """Admin-authored, guild-scoped explicit species list for the Event category.
+
+    No filter/rule-based definitions in v1 — an admin manually lists every dex
+    number in the event. `/admin event disable` retires one without deleting
+    it (reusable next time, e.g. an annual Halloween event).
+    """
+
+    __tablename__ = "event_definitions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    flavor_text: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    dex_list: Mapped[str] = mapped_column(String)  # newline-joined explicit dex numbers
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    @property
+    def dex_numbers(self) -> list[int]:
+        return [int(x) for x in self.dex_list.splitlines() if x.strip()]
+
+
+class LocationArea(Base):
+    """Cached PokeAPI `location-area` lookup — shared cache, not guild-scoped.
+
+    Primary key is the PokeAPI location-area id (from the curated list in
+    weeklyvote.py), not autoincrement, so a re-fetch is a straight upsert.
+    """
+
+    __tablename__ = "location_areas"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    name: Mapped[str] = mapped_column(String(128))  # PokeAPI slug, e.g. "kanto-route-1-area"
+    display_name: Mapped[str] = mapped_column(String(128))  # e.g. "Kanto Route 1"
+    dex_pool: Mapped[str] = mapped_column(String)  # newline-joined dex numbers
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    @property
+    def dex_numbers(self) -> list[int]:
+        return [int(x) for x in self.dex_pool.splitlines() if x.strip()]
+
+
+class TypePool(Base):
+    """Cached PokeAPI `/type/{name}` lookup — shared cache, not guild-scoped."""
+
+    __tablename__ = "type_pools"
+
+    key: Mapped[str] = mapped_column(String(32), primary_key=True)  # type name, e.g. "fire"
+    name: Mapped[str] = mapped_column(String(128))
+    display_name: Mapped[str] = mapped_column(String(128))
+    dex_pool: Mapped[str] = mapped_column(String)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    @property
+    def dex_numbers(self) -> list[int]:
+        return [int(x) for x in self.dex_pool.splitlines() if x.strip()]
+
+
+class HabitatPool(Base):
+    """Cached PokeAPI `/pokemon-habitat/{name}` lookup — shared cache, not guild-scoped."""
+
+    __tablename__ = "habitat_pools"
+
+    key: Mapped[str] = mapped_column(String(32), primary_key=True)  # habitat name, e.g. "cave"
+    name: Mapped[str] = mapped_column(String(128))
+    display_name: Mapped[str] = mapped_column(String(128))
+    dex_pool: Mapped[str] = mapped_column(String)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    @property
+    def dex_numbers(self) -> list[int]:
+        return [int(x) for x in self.dex_pool.splitlines() if x.strip()]
+
+
+class WildEncounter(Base):
+    """The Pokemon posted into a guild's wild-encounter thread on a given local
+    date — the wild-encounter counterpart of `DailyPokemon`. One row per guild
+    per day the thread got a fresh random pick from that week's
+    `WeeklyVote.resolved_dex_pool`. Not part of the design doc's explicit table
+    list, but required to give `/submit` something to point at (mirrors how
+    `DailyPokemon` anchors the main daily thread's submissions) — see the
+    "Same `WildEncounter` row shape as originally planned" note in the doc.
+    """
+
+    __tablename__ = "wild_encounters"
+    __table_args__ = (UniqueConstraint("guild_id", "local_date", name="uq_wildencounter_guild_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    weekly_vote_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("weekly_votes.id", ondelete="CASCADE"), index=True
+    )
+    local_date: Mapped[date] = mapped_column(Date, index=True)
+    dex_no: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(64))
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    weekly_vote: Mapped[WeeklyVote] = relationship(back_populates="wild_encounters")
+    submissions: Mapped[list[WildEncounterSubmission]] = relationship(
+        back_populates="wild_encounter", cascade="all, delete-orphan"
+    )
+
+
+class WildEncounterSubmission(Base):
+    """A sketch submitted to a guild's wild-encounter thread — the
+    wild-encounter counterpart of `Submission`.
+
+    Kept as its own table rather than widening `Submission` (which would need
+    a manual ALTER TABLE + NOT NULL relaxation on `daily_id` for every existing
+    deployment) — a brand-new table only needs `create_all()`, no migration.
+    """
+
+    __tablename__ = "wild_encounter_submissions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    wild_encounter_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("wild_encounters.id", ondelete="CASCADE"), index=True
+    )
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    image_url: Mapped[str] = mapped_column(String(1024), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    wild_encounter: Mapped[WildEncounter] = relationship(back_populates="submissions")
+
+    @property
+    def dex_no(self) -> int:
+        return self.wild_encounter.dex_no
+
+    @property
+    def species_name(self) -> str:
+        return self.wild_encounter.name
+
+    @property
+    def is_shiny(self) -> bool:
+        # No shiny mechanic for wild encounters in v1.
+        return False

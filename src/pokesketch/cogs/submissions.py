@@ -76,11 +76,36 @@ async def _award_exp(s, guild_id: int, user_id: int, kind: str, amount: int) -> 
     global_user.level = leveling.level_for_exp(global_user.exp)
 
 
+async def _find_wild_encounter_for_thread(
+    s, thread_id: int, guild_id: int, today_local: date
+) -> db.WildEncounter | None:
+    """If `thread_id` is a guild's wild-encounter thread (WeeklyVote.thread_id),
+    return today's WildEncounter row for it, or None if the thread doesn't
+    match, or today's pick hasn't posted yet."""
+    wv = (
+        await s.execute(
+            select(db.WeeklyVote).where(db.WeeklyVote.guild_id == guild_id, db.WeeklyVote.thread_id == thread_id)
+        )
+    ).scalar_one_or_none()
+    if wv is None:
+        return None
+    return (
+        await s.execute(
+            select(db.WildEncounter).where(
+                db.WildEncounter.weekly_vote_id == wv.id, db.WildEncounter.local_date == today_local
+            )
+        )
+    ).scalar_one_or_none()
+
+
 class Submissions(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @app_commands.command(name="submit", description="Submit your sketch for the day (run inside a daily thread).")
+    @app_commands.command(
+        name="submit",
+        description="Submit your sketch for the day (run inside a daily or wild-encounter thread).",
+    )
     @app_commands.describe(image="Your sketch image")
     async def submit(self, interaction: discord.Interaction, image: discord.Attachment) -> None:
         channel = interaction.channel
@@ -104,78 +129,164 @@ class Submissions(commands.Cog):
                     select(db.DailyPokemon).where(db.DailyPokemon.thread_id == channel.id)
                 )
             ).scalar_one_or_none()
-            if daily is None:
-                await interaction.followup.send(
-                    "This thread isn't a recognized daily thread.", ephemeral=True
+
+            if daily is not None:
+                confirmation, _exp_msg = await self._submit_to_daily(
+                    s, daily, channel, image, gid, uid, interaction.user.mention
                 )
+                await s.commit()
+                await interaction.followup.send(confirmation, ephemeral=True)
                 return
 
             cfg = await s.get(db.GuildConfig, gid)
-            grace_period_days = cfg.grace_period_days if cfg else 7
             tz = cfg.timezone if cfg else "UTC"
             today_local = datetime.now(ZoneInfo(tz)).date()
-            if _is_outside_grace_window(daily.local_date, today_local, grace_period_days):
+            wild_encounter = await _find_wild_encounter_for_thread(s, channel.id, gid, today_local)
+            if wild_encounter is None:
                 await interaction.followup.send(
-                    f"This thread's Pokémon is outside the {grace_period_days}-day submission "
-                    "window and can no longer accept new sketches.",
+                    "This thread isn't a recognized daily or wild-encounter thread (or today's "
+                    "wild encounter hasn't posted yet).",
                     ephemeral=True,
                 )
                 return
 
-            display_name = species_display_name(daily.name)
-
-            # One submission per user per day (updates image if re-submitting).
-            existing = (
-                await s.execute(
-                    select(db.Submission).where(
-                        db.Submission.daily_id == daily.id, db.Submission.user_id == uid
-                    )
-                )
-            ).scalar_one_or_none()
-
-            posted = await channel.send(
-                content=_submission_header(display_name, interaction.user.mention),
-                file=await image.to_file(),
+            confirmation, _exp_msg = await self._submit_to_wild_encounter(
+                s, wild_encounter, channel, image, gid, uid, interaction.user.mention, today_local
             )
-            await posted.add_reaction(UPVOTE_EMOJI)
-
-            first_time = existing is None
-            if existing is None:
-                sub = db.Submission(
-                    guild_id=gid, user_id=uid, daily_id=daily.id,
-                    message_id=posted.id, image_url=posted.attachments[0].url,
-                )
-                s.add(sub)
-                await s.flush()  # assign sub.id for the PokeBox pointer below
-            else:
-                existing.message_id = posted.id
-                existing.image_url = posted.attachments[0].url
-                sub = existing
-
-            # PokeBox: every submitted sketch scans that dex number into the player's
-            # Pokédex (free, automatic, insert-if-not-exists).
-            await pokebox.record_pokebox_scan(s, uid, daily.dex_no, sub.id)
-
-            exp_msg = ""
-            if first_time:
-                # Base EXP + streak handling (streak only advances for "today").
-                await _award_exp(s, gid, uid, "submit", leveling.EXP_SUBMIT)
-                user = await _get_or_create_user(s, gid, uid)
-                bonus = self._update_streak(user, daily.local_date)
-                if bonus:
-                    await _award_exp(s, gid, uid, "streak", bonus)
-                global_user = await _get_or_create_global_user(s, uid)
-                self._update_global_streak(global_user, daily.local_date)
-                await self._update_guild_stats(s, gid, daily.local_date)
-                total = leveling.EXP_SUBMIT + bonus
-                exp_msg = f" (+{total} EXP)"
-
             await s.commit()
 
-        await interaction.followup.send(
-            _submission_confirmation(display_name, first_time, exp_msg),
-            ephemeral=True,
+        await interaction.followup.send(confirmation, ephemeral=True)
+
+    async def _submit_to_daily(
+        self,
+        s,
+        daily: db.DailyPokemon,
+        channel: discord.Thread,
+        image: discord.Attachment,
+        gid: int,
+        uid: int,
+        mention: str,
+    ) -> tuple[str, str]:
+        cfg = await s.get(db.GuildConfig, gid)
+        grace_period_days = cfg.grace_period_days if cfg else 7
+        tz = cfg.timezone if cfg else "UTC"
+        today_local = datetime.now(ZoneInfo(tz)).date()
+        if _is_outside_grace_window(daily.local_date, today_local, grace_period_days):
+            return (
+                f"This thread's Pokémon is outside the {grace_period_days}-day submission "
+                "window and can no longer accept new sketches.",
+                "",
+            )
+
+        display_name = species_display_name(daily.name)
+
+        # One submission per user per day (updates image if re-submitting).
+        existing = (
+            await s.execute(
+                select(db.Submission).where(db.Submission.daily_id == daily.id, db.Submission.user_id == uid)
+            )
+        ).scalar_one_or_none()
+
+        posted = await channel.send(
+            content=_submission_header(display_name, mention),
+            file=await image.to_file(),
         )
+        await posted.add_reaction(UPVOTE_EMOJI)
+
+        first_time = existing is None
+        if existing is None:
+            sub = db.Submission(
+                guild_id=gid, user_id=uid, daily_id=daily.id,
+                message_id=posted.id, image_url=posted.attachments[0].url,
+            )
+            s.add(sub)
+            await s.flush()  # assign sub.id for the PokeBox pointer below
+        else:
+            existing.message_id = posted.id
+            existing.image_url = posted.attachments[0].url
+            sub = existing
+
+        # PokeBox: every submitted sketch scans that dex number into the player's
+        # Pokédex (free, automatic, insert-if-not-exists).
+        await pokebox.record_pokebox_scan(s, uid, daily.dex_no, sub.id)
+
+        exp_msg = ""
+        if first_time:
+            total = await self._award_submission_rewards(s, gid, uid, daily.local_date, leveling.EXP_SUBMIT, "submit")
+            exp_msg = f" (+{total} EXP)"
+
+        return _submission_confirmation(display_name, first_time, exp_msg), exp_msg
+
+    async def _submit_to_wild_encounter(
+        self,
+        s,
+        wild_encounter: db.WildEncounter,
+        channel: discord.Thread,
+        image: discord.Attachment,
+        gid: int,
+        uid: int,
+        mention: str,
+        today_local: date,
+    ) -> tuple[str, str]:
+        display_name = species_display_name(wild_encounter.name)
+
+        # One submission per user per day per wild encounter (updates image if re-submitting).
+        existing = (
+            await s.execute(
+                select(db.WildEncounterSubmission).where(
+                    db.WildEncounterSubmission.wild_encounter_id == wild_encounter.id,
+                    db.WildEncounterSubmission.user_id == uid,
+                )
+            )
+        ).scalar_one_or_none()
+
+        posted = await channel.send(
+            content=_submission_header(display_name, mention),
+            file=await image.to_file(),
+        )
+        await posted.add_reaction(UPVOTE_EMOJI)
+
+        first_time = existing is None
+        if existing is None:
+            sub = db.WildEncounterSubmission(
+                guild_id=gid, user_id=uid, wild_encounter_id=wild_encounter.id,
+                message_id=posted.id, image_url=posted.attachments[0].url,
+            )
+            s.add(sub)
+            await s.flush()  # assign sub.id for the PokeBox pointer below
+        else:
+            existing.message_id = posted.id
+            existing.image_url = posted.attachments[0].url
+            sub = existing
+
+        await pokebox.record_pokebox_scan(s, uid, wild_encounter.dex_no, None)
+
+        exp_msg = ""
+        if first_time:
+            total = await self._award_submission_rewards(
+                s, gid, uid, today_local, leveling.EXP_WILD_ENCOUNTER, "wild_submit"
+            )
+            exp_msg = f" (+{total} EXP)"
+
+        return _submission_confirmation(display_name, first_time, exp_msg), exp_msg
+
+    @staticmethod
+    async def _award_submission_rewards(s, gid: int, uid: int, submit_date: date, base_exp: int, kind: str) -> int:
+        """Shared EXP/streak/guild-stats path for a first-time submission of the
+        day, to either the main daily or wild-encounter thread. Reuses the
+        same streak logic either way, so at most one streak increment lands
+        per day — globally and per-guild — regardless of which thread(s) a
+        user submits to. Returns the total EXP granted (base + streak bonus).
+        """
+        await _award_exp(s, gid, uid, kind, base_exp)
+        user = await _get_or_create_user(s, gid, uid)
+        bonus = Submissions._update_streak(user, submit_date)
+        if bonus:
+            await _award_exp(s, gid, uid, "streak", bonus)
+        global_user = await _get_or_create_global_user(s, uid)
+        Submissions._update_global_streak(global_user, submit_date)
+        await Submissions._update_guild_stats(s, gid, submit_date)
+        return base_exp + bonus
 
     @staticmethod
     def _update_streak(user: db.User, submit_date: date) -> int:
@@ -209,7 +320,9 @@ class Submissions(commands.Cog):
     async def _update_guild_stats(s, guild_id: int, submit_date: date) -> None:
         stats = await s.get(db.GuildStats, guild_id)
         if stats is None:
-            stats = db.GuildStats(guild_id=guild_id)
+            # Explicit zeros: column `default=` values aren't applied to the Python
+            # attribute until flush, and total_submissions += 1 below needs a real int.
+            stats = db.GuildStats(guild_id=guild_id, global_streak=0, longest_global_streak=0, total_submissions=0)
             s.add(stats)
         stats.total_submissions += 1
         last = stats.last_active_date

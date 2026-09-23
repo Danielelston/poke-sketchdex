@@ -9,7 +9,7 @@ from datetime import date
 import discord
 from sqlalchemy import select
 
-from . import db
+from . import db, weeklyvote
 from .embeds import daily_embed
 from .pokeapi import PokeApiClient
 from .selection import pick_dex_no
@@ -110,4 +110,68 @@ async def post_daily_for_guild(
         )
         await s.commit()
     log.info("Guild %s: posted daily #%s %s (shiny=%s).", guild_id, ref.dex_no, ref.name, shiny)
+    return True
+
+
+async def post_wild_encounter_for_guild(
+    client: discord.Client,
+    api: PokeApiClient,
+    guild_id: int,
+    local_date: date,
+) -> bool:
+    """Post today's fresh random pick into the guild's active wild-encounter
+    thread, if it has one. "Active" is the most recent WeeklyVote with a
+    non-null thread_id (see weeklyvote.get_active_weekly_vote) so the
+    previous cycle's thread keeps getting daily posts with no gap while this
+    week's day-1/day-2 votes are still in progress.
+    """
+    async with db.session() as s:
+        wv = await weeklyvote.get_active_weekly_vote(s, guild_id)
+        if wv is None or wv.thread_id is None:
+            return False
+        dex_pool = wv.dex_pool_numbers
+        if not dex_pool:
+            return False
+        existing = (
+            await s.execute(
+                select(db.WildEncounter).where(
+                    db.WildEncounter.guild_id == guild_id, db.WildEncounter.local_date == local_date
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return False  # idempotent: already posted today
+        thread_id, weekly_vote_id = wv.thread_id, wv.id
+
+    dex_no = random.choice(dex_pool)
+    ref = await api.get_pokemon(dex_no)
+    images = ref.reference_images(shiny=False)
+
+    thread = client.get_channel(thread_id)
+    if thread is None:
+        try:
+            thread = await client.fetch_channel(thread_id)
+        except discord.DiscordException:
+            log.warning("Guild %s: wild-encounter thread %s not found.", guild_id, thread_id)
+            return False
+
+    embed = daily_embed(ref, False, images)
+    embed.title = f"🌿 Wild encounter: #{ref.dex_no:04d} {ref.display_name()}"
+    msg = await thread.send(
+        content="A wild Pokemon appeared! Sketch it with `/submit`.", embed=embed
+    )
+
+    async with db.session() as s:
+        s.add(
+            db.WildEncounter(
+                guild_id=guild_id,
+                weekly_vote_id=weekly_vote_id,
+                local_date=local_date,
+                dex_no=ref.dex_no,
+                name=ref.name,
+                message_id=msg.id,
+            )
+        )
+        await s.commit()
+    log.info("Guild %s: posted wild encounter #%s %s.", guild_id, ref.dex_no, ref.name)
     return True

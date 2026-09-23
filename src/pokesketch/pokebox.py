@@ -21,7 +21,7 @@ from PIL import Image, ImageOps
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from .db import CaughtMon, GlobalUser, GuildConfig, PokeballWallet, PokeBox, Submission
+from .db import CaughtMon, GlobalUser, GuildConfig, PokeballWallet, PokeBox, Submission, WildEncounterSubmission
 from .formatting import species_display_name
 
 log = logging.getLogger(__name__)
@@ -130,18 +130,45 @@ def _naive_utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
-async def catchable_submissions(s, user_id: int) -> list[tuple[Submission, int]]:
+CatchableSubmission = Submission | WildEncounterSubmission
+
+
+def encode_catch_target(sub: CatchableSubmission) -> str:
+    """Encode a catchable row into an opaque /catch target string.
+
+    Submission and WildEncounterSubmission are separate tables with their own
+    id sequences, so a bare id would be ambiguous between the two — prefix
+    with the source so decode_catch_target can tell them apart.
+    """
+    prefix = "w" if isinstance(sub, WildEncounterSubmission) else "s"
+    return f"{prefix}{sub.id}"
+
+
+def decode_catch_target(raw: str) -> tuple[str, int] | None:
+    """Inverse of encode_catch_target. Returns None for any malformed input
+    (e.g. a stale value from before this encoding existed)."""
+    if len(raw) < 2 or raw[0] not in ("s", "w"):
+        return None
+    try:
+        return raw[0], int(raw[1:])
+    except ValueError:
+        return None
+
+
+async def catchable_submissions(s, user_id: int) -> list[tuple[CatchableSubmission, int]]:
     """All of this user's eligible, not-yet-caught submissions across every guild
-    (catching is global/cross-guild by design), most recent first.
+    and both the main-daily and wild-encounter threads (catching is
+    global/cross-guild by design), most recent first.
 
     Each result is paired with that submission's own guild's catch_window_hours
     (a submission's eligibility is judged against its own guild's setting, not
     a single global value, since different guilds can configure different
-    windows). Excludes submissions already pointed at by a CaughtMon via
-    source_submission_id, so the same sketch can't be caught twice.
+    windows). Excludes submissions already pointed at by a CaughtMon (via
+    source_submission_id or source_wild_encounter_submission_id), so the same
+    sketch can't be caught twice.
     """
     now = _naive_utcnow()
-    caught_ids = set(
+    caught_daily_ids = set(
         (
             await s.execute(
                 select(CaughtMon.source_submission_id).where(
@@ -150,25 +177,49 @@ async def catchable_submissions(s, user_id: int) -> list[tuple[Submission, int]]
             )
         ).scalars().all()
     )
-    rows = (
+    caught_wild_ids = set(
+        (
+            await s.execute(
+                select(CaughtMon.source_wild_encounter_submission_id).where(
+                    CaughtMon.user_id == user_id, CaughtMon.source_wild_encounter_submission_id.is_not(None)
+                )
+            )
+        ).scalars().all()
+    )
+    daily_rows = (
         await s.execute(
             select(Submission, GuildConfig.catch_window_hours)
             .join(GuildConfig, GuildConfig.guild_id == Submission.guild_id)
             .options(selectinload(Submission.daily))
             .where(Submission.user_id == user_id)
-            .order_by(Submission.id.desc())
         )
     ).all()
-    out: list[tuple[Submission, int]] = []
-    for sub, catch_window_hours in rows:
-        if sub.id in caught_ids:
+    wild_rows = (
+        await s.execute(
+            select(WildEncounterSubmission, GuildConfig.catch_window_hours)
+            .join(GuildConfig, GuildConfig.guild_id == WildEncounterSubmission.guild_id)
+            .options(selectinload(WildEncounterSubmission.wild_encounter))
+            .where(WildEncounterSubmission.user_id == user_id)
+        )
+    ).all()
+
+    out: list[tuple[CatchableSubmission, int]] = []
+    for sub, catch_window_hours in daily_rows:
+        if sub.id in caught_daily_ids:
             continue
         if sub.created_at >= now - timedelta(hours=catch_window_hours):
             out.append((sub, catch_window_hours))
+    for sub, catch_window_hours in wild_rows:
+        if sub.id in caught_wild_ids:
+            continue
+        if sub.created_at >= now - timedelta(hours=catch_window_hours):
+            out.append((sub, catch_window_hours))
+
+    out.sort(key=lambda pair: pair[0].created_at, reverse=True)
     return out
 
 
-def catch_label_parts(sub: Submission, catch_window_hours: int) -> tuple[str, str, str]:
+def catch_label_parts(sub: CatchableSubmission, catch_window_hours: int) -> tuple[str, str, str]:
     """Return (species display name, relative day label, time-left label) for a
     /catch autocomplete choice, e.g. ("Pikachu", "today", "18h left")."""
     now = _naive_utcnow()
@@ -180,7 +231,7 @@ def catch_label_parts(sub: Submission, catch_window_hours: int) -> tuple[str, st
         time_left = f"{ceil(remaining_hours / 24)}d left"
     created_date = sub.created_at.date()
     day_label = "today" if created_date == now.date() else f"{created_date:%b} {created_date.day}"
-    return species_display_name(sub.daily.name), day_label, time_left
+    return species_display_name(sub.species_name), day_label, time_left
 
 
 def _next_free_slot(taken: set[int], upper: int) -> int | None:
@@ -230,17 +281,18 @@ async def catch_submission(
     s,
     user_id: int,
     cache_dir: str,
-    target_submission_id: int | None = None,
+    target: str | None = None,
     nickname: str | None = None,
 ) -> CaughtMon:
     """Spend 1 pokeball to catch an eligible, not-yet-caught submission.
 
     With no target, catches the user's single most recent eligible submission
     (same UX as before, widened from "today only" to each guild's catch
-    window). With a target, always re-resolves it against the live eligible
-    set at execution time — Discord doesn't guarantee a submitted `target`
-    string actually came from the autocomplete list, and the window could
-    have lapsed or a concurrent request could have caught it in between.
+    window). With a target (an encode_catch_target string), always
+    re-resolves it against the live eligible set at execution time — Discord
+    doesn't guarantee a submitted `target` string actually came from the
+    autocomplete list, and the window could have lapsed or a concurrent
+    request could have caught it in between.
 
     Raises CatchError for any expected failure (no pokeballs, no eligible
     submission, stale/invalid target, bad nickname, storage full) — caller
@@ -251,12 +303,17 @@ async def catch_submission(
         raise CatchError("No pokeballs left. Check `/pokeballs` for your next weekly grant.")
 
     eligible = await catchable_submissions(s, user_id)
-    if target_submission_id is None:
+    if target is None:
         if not eligible:
             raise CatchError("No catchable sketches right now — `/submit` first, then `/catch`.")
         sub, _ = eligible[0]
     else:
-        match = next((e for e in eligible if e[0].id == target_submission_id), None)
+        decoded = decode_catch_target(target)
+        match = None
+        if decoded is not None:
+            kind, sub_id = decoded
+            source_type = WildEncounterSubmission if kind == "w" else Submission
+            match = next((e for e in eligible if e[0].id == sub_id and isinstance(e[0], source_type)), None)
         if match is None:
             raise CatchError(
                 "That sketch is no longer catchable — it may be outside the window or "
@@ -285,12 +342,13 @@ async def catch_submission(
         user_id=user_id,
         is_active=is_active,
         slot=slot,
-        dex_no=sub.daily.dex_no,
-        name=sub.daily.name,
-        is_shiny=sub.daily.is_shiny,
+        dex_no=sub.dex_no,
+        name=sub.species_name,
+        is_shiny=sub.is_shiny,
         nickname=clean_nickname,
         cached_image_path="",
-        source_submission_id=sub.id,
+        source_submission_id=sub.id if isinstance(sub, Submission) else None,
+        source_wild_encounter_submission_id=sub.id if isinstance(sub, WildEncounterSubmission) else None,
     )
     s.add(mon)
     await s.flush()  # assign mon.id for the cache filename
