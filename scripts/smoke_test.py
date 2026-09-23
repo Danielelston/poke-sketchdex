@@ -938,12 +938,84 @@ async def main() -> None:
     print("help EXP explainer OK: matches live leveling constants")
 
     # Issue 6: /help-admin's content mentions the two new grace/catch-window settings.
-    from pokesketch.cogs.help import _admin_field_value
+    from pokesketch.cogs.help import _admin_field_groups
 
-    admin_text = _admin_field_value()
+    admin_text = "\n".join(value for _name, value in _admin_field_groups())
     assert "/set-grace-period" in admin_text, admin_text
     assert "/set-catch-window" in admin_text, admin_text
     print("help-admin OK: admin command list includes the grace-period and catch-window settings")
+
+    # Regression test: /help-admin used to build a single embed field over
+    # Discord's 1024-char limit (embed.add_field 400s -> the interaction times
+    # out with "The application did not respond"). Guard both help-text
+    # builders directly, then exercise the real command handlers end-to-end
+    # and validate the assembled embeds against every one of Discord's actual
+    # embed limits, so a future appended command trips this test, not prod.
+    from pokesketch.cogs.help import DISCORD_EMBED_FIELD_LIMIT, Help, _exp_field_value
+
+    assert len(_exp_field_value()) <= DISCORD_EMBED_FIELD_LIMIT, len(_exp_field_value())
+    for group_name, group_value in _admin_field_groups():
+        assert len(group_value) <= DISCORD_EMBED_FIELD_LIMIT, (group_name, len(group_value))
+    print(
+        "help field length OK: exp field "
+        f"{len(_exp_field_value())} chars, admin groups "
+        f"{[len(v) for _n, v in _admin_field_groups()]} chars, all <= {DISCORD_EMBED_FIELD_LIMIT}"
+    )
+
+    class _FakeHelpUser:
+        id = 1
+        display_name = "smoke-tester"
+
+    class _FakeHelpResponse:
+        def __init__(self):
+            self.sent_embed = None
+
+        async def send_message(self, embed=None, ephemeral=False):
+            self.sent_embed = embed
+
+    class _FakeHelpInteraction:
+        def __init__(self):
+            self.user = _FakeHelpUser()
+            self.guild_id = 1
+            self.response = _FakeHelpResponse()
+
+    def _assert_embed_within_discord_limits(embed) -> int:
+        title = embed.title or ""
+        description = embed.description or ""
+        footer_text = embed.footer.text if embed.footer else ""
+        assert len(title) <= 256, len(title)
+        assert len(description) <= 4096, len(description)
+        assert len(embed.fields) <= 25, len(embed.fields)
+        assert len(footer_text) <= 2048, len(footer_text)
+        total = len(title) + len(description) + len(footer_text)
+        for field in embed.fields:
+            assert len(field.name) <= 256, (field.name, len(field.name))
+            assert len(field.value) <= DISCORD_EMBED_FIELD_LIMIT, (field.name, len(field.value))
+            total += len(field.name) + len(field.value)
+        assert total <= 6000, total
+        return total
+
+    help_cog = Help(bot=None)
+
+    admin_interaction = _FakeHelpInteraction()
+    await help_cog.help_admin_cmd.callback(help_cog, admin_interaction)
+    admin_embed = admin_interaction.response.sent_embed
+    admin_total = _assert_embed_within_discord_limits(admin_embed)
+    print(
+        f"help-admin embed OK: {len(admin_embed.fields)} fields, "
+        f"{[len(f.value) for f in admin_embed.fields]} chars each, {admin_total} total "
+        "(all within Discord's embed limits)"
+    )
+
+    help_interaction = _FakeHelpInteraction()
+    await help_cog.help_cmd.callback(help_cog, help_interaction)
+    help_embed = help_interaction.response.sent_embed
+    help_total = _assert_embed_within_discord_limits(help_embed)
+    print(
+        f"help embed OK: {len(help_embed.fields)} fields, "
+        f"{[len(f.value) for f in help_embed.fields]} chars each, {help_total} total "
+        "(all within Discord's embed limits)"
+    )
 
     print("ALL SMOKE TESTS PASSED")
 
