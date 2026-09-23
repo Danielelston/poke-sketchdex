@@ -79,20 +79,15 @@ async def _award_exp(s, guild_id: int, user_id: int, kind: str, amount: int) -> 
 async def _find_wild_encounter_for_thread(
     s, thread_id: int, guild_id: int, today_local: date
 ) -> db.WildEncounter | None:
-    """If `thread_id` is a guild's wild-encounter thread (WeeklyVote.thread_id),
-    return today's WildEncounter row for it, or None if the thread doesn't
-    match, or today's pick hasn't posted yet."""
-    wv = (
-        await s.execute(
-            select(db.WeeklyVote).where(db.WeeklyVote.guild_id == guild_id, db.WeeklyVote.thread_id == thread_id)
-        )
-    ).scalar_one_or_none()
-    if wv is None:
-        return None
+    """If `thread_id` is today's wild-encounter thread for this guild
+    (WildEncounter.thread_id — each day gets its own fresh thread), return
+    that row, or None if the thread doesn't match today's wild encounter."""
     return (
         await s.execute(
             select(db.WildEncounter).where(
-                db.WildEncounter.weekly_vote_id == wv.id, db.WildEncounter.local_date == today_local
+                db.WildEncounter.guild_id == guild_id,
+                db.WildEncounter.thread_id == thread_id,
+                db.WildEncounter.local_date == today_local,
             )
         )
     ).scalar_one_or_none()
