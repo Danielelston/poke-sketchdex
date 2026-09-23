@@ -15,16 +15,22 @@ from discord import app_commands
 from discord.ext import commands
 
 from .. import db, pokebox
+from ..formatting import species_display_name
 from ..ui import PaginatorView
 
 log = logging.getLogger(__name__)
 
 BOX_PAGE_SIZE = 10
 
+MAX_AUTOCOMPLETE_CHOICES = 25
+
 
 def _display_name(mon: db.CaughtMon) -> str:
     shiny_tag = " ✨" if mon.is_shiny else ""
-    return f"#{mon.dex_no:04d} {mon.name.replace('-', ' ').title()}{shiny_tag}"
+    species = f"#{mon.dex_no:04d} {species_display_name(mon.name)}{shiny_tag}"
+    if mon.nickname:
+        return f"{mon.nickname} ({species})"
+    return species
 
 
 class Collection(commands.Cog):
@@ -49,12 +55,63 @@ class Collection(commands.Cog):
         embed.add_field(name="By generation", value="\n".join(gen_lines), inline=False)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="catch", description="Spend a pokeball to catch today's just-submitted sketch.")
-    async def catch(self, interaction: discord.Interaction) -> None:
+    async def _catch_target_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        async with db.session() as s:
+            eligible = await pokebox.catchable_submissions(s, interaction.user.id)
+
+        results: list[tuple[str, str]] = []
+        for sub, catch_window_hours in eligible:
+            species, day_label, time_left = pokebox.catch_label_parts(sub, catch_window_hours)
+            if sub.guild_id != interaction.guild_id:
+                guild = self.bot.get_guild(sub.guild_id)
+                guild_name = guild.name if guild else str(sub.guild_id)
+                day_label = f"{day_label} ({guild_name})"
+            label = f"{species} — {day_label}, {time_left}"
+            results.append((label, str(sub.id)))
+
+        if current:
+            cur = current.lower()
+            results = [r for r in results if cur in r[0].lower()]
+
+        return [
+            app_commands.Choice(name=label, value=value)
+            for label, value in results[:MAX_AUTOCOMPLETE_CHOICES]
+        ]
+
+    @app_commands.command(
+        name="catch", description="Spend a pokeball to catch an eligible sketch into your party/storage."
+    )
+    @app_commands.describe(
+        target="Which sketch to catch (leave blank for your most recent eligible one)",
+        nickname="Optional nickname for this mon (max 12 chars)",
+    )
+    @app_commands.autocomplete(target=_catch_target_autocomplete)
+    async def catch(
+        self,
+        interaction: discord.Interaction,
+        target: str | None = None,
+        nickname: str | None = None,
+    ) -> None:
         await interaction.response.defer(thinking=True, ephemeral=True)
+        target_id: int | None = None
+        if target is not None:
+            try:
+                target_id = int(target)
+            except ValueError:
+                await interaction.followup.send(
+                    "❌ That sketch is no longer catchable — it may be outside the window or "
+                    "already caught. Run `/catch` again to see current options.",
+                    ephemeral=True,
+                )
+                return
         try:
             async with db.session() as s:
-                mon = await pokebox.catch_todays_submission(s, interaction.user.id, self.bot.config.party_cache_dir)
+                mon = await pokebox.catch_submission(
+                    s, interaction.user.id, self.bot.config.party_cache_dir,
+                    target_submission_id=target_id, nickname=nickname,
+                )
                 await s.commit()
         except pokebox.CatchError as exc:
             await interaction.followup.send(f"❌ {exc}", ephemeral=True)

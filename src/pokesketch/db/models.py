@@ -45,6 +45,12 @@ class GuildConfig(Base):
     # Inclusive national-dex range the daily pick draws from.
     dex_min: Mapped[int] = mapped_column(Integer, default=1)
     dex_max: Mapped[int] = mapped_column(Integer, default=1025)
+    # Days back a thread stays open for /submit backfill (guild-local dates).
+    grace_period_days: Mapped[int] = mapped_column(Integer, default=7)
+    # Hours a submission stays catchable via /catch. Can never exceed
+    # grace_period_days * 24 — enforced by /set-catch-window and re-clamped
+    # by /set-grace-period if it's later lowered below this value.
+    catch_window_hours: Mapped[int] = mapped_column(Integer, default=24)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     dailies: Mapped[list[DailyPokemon]] = relationship(
@@ -243,6 +249,8 @@ class CaughtMon(Base):
     dex_no: Mapped[int] = mapped_column(Integer)
     name: Mapped[str] = mapped_column(String(64))
     is_shiny: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Optional cosmetic overlay, separate from the authoritative species `name`.
+    nickname: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Local file path on disk (data/party_cache/{user_id}/{id}.png), NOT a Discord URL.
     cached_image_path: Mapped[str] = mapped_column(String(1024))
     caught_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
