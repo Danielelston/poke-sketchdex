@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from .. import db
 from ..daily import post_daily_for_guild
+from ..default_events import MAX_EVENTS_PER_GUILD, seed_default_events
 from ..discord_limits import DISCORD_EMBED_FIELD_VALUE_LIMIT, guarded_add_field
 from ..selection import clear_used_pool
 from ..ui import ConfirmView, PaginatorView
@@ -29,11 +30,13 @@ GRACE_PERIOD_MAX_DAYS = 30
 MIN_DEX_NO = 1
 MAX_DEX_NO = 1025
 
-MAX_EVENTS_PER_GUILD = 50
 EVENT_NAME_MAX_LEN = 80
 EVENT_FLAVOR_TEXT_MAX_LEN = 300
 EVENT_MAX_DEX_NUMBERS = 200
 EVENT_LIST_PAGE_SIZE = 15
+# A resolved event pool serves all 7 days of the week via random.choice with
+# no repeat-avoidance, so anything under this guarantees repeats in a week.
+EVENT_MIN_RECOMMENDED_DEX = 7
 
 WEEKDAY_CHOICES = [
     app_commands.Choice(name="Monday", value=0),
@@ -85,6 +88,17 @@ def _render_dex_numbers(dex_numbers: list[int]) -> str:
         if len(candidate) <= DISCORD_EMBED_FIELD_VALUE_LIMIT:
             return candidate
     return f"… (+{len(tokens)} more)"
+
+
+def _short_event_warning(dex_count: int) -> str | None:
+    """Non-blocking warning for /event-create and /event-edit when a dex list
+    is under EVENT_MIN_RECOMMENDED_DEX — None if there's nothing to warn about."""
+    if dex_count >= EVENT_MIN_RECOMMENDED_DEX:
+        return None
+    return (
+        f"⚠️ Only {dex_count} Pokemon — expect repeats within the week (a resolved event pool "
+        "serves all 7 days). Add more for full variety if you'd like."
+    )
 
 
 def _validate_grace_period(days: int) -> bool:
@@ -155,6 +169,12 @@ class Admin(commands.Cog):
             if await s.get(db.GuildStats, gid) is None:
                 s.add(db.GuildStats(guild_id=gid))
                 await s.commit()
+        async with db.session() as s:
+            # Idempotent — no-ops for guilds already seeded (e.g. on join, or a
+            # previous /setup run). Covers guilds that joined before this
+            # feature shipped, since they'll never fire on_guild_join again.
+            await seed_default_events(s, self.bot.api, gid)
+            await s.commit()
         self.bot.reschedule_guild(gid, time, timezone)
         self.bot.reschedule_guild_votes(gid, vote_day1_weekday, time, timezone)
         await interaction.response.send_message(
@@ -363,7 +383,8 @@ class Admin(commands.Cog):
     @app_commands.command(name="event-create", description="Create an admin-authored wild-encounter Event.")
     @app_commands.describe(
         name="Event name, e.g. 'Eeveelution Week'",
-        dex_numbers="Space or comma-separated dex numbers, e.g. '133 134 135 136 196 197 470 471'",
+        dex_numbers="Space or comma-separated dex numbers, e.g. '133 134 135 136 196 197 470 471' "
+        f"(use at least {EVENT_MIN_RECOMMENDED_DEX} for a full week without repeats)",
         flavor_text="Optional short note on why this event exists, e.g. "
         "'Spooky-themed pool for the Halloween season'",
     )
@@ -422,11 +443,14 @@ class Admin(commands.Cog):
                 )
             )
             await s.commit()
-        await interaction.response.send_message(
+        msg = (
             f"✅ Created event **{name}** with {len(dex_list)} Pokemon. "
-            "It'll appear on the day-1 vote ballot from next week.",
-            ephemeral=True,
+            "It'll appear on the day-1 vote ballot from next week."
         )
+        warning = _short_event_warning(len(dex_list))
+        if warning:
+            msg += f"\n{warning}"
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(name="event-list", description="List this server's wild-encounter Events.")
     async def event_list(self, interaction: discord.Interaction) -> None:
@@ -591,7 +615,8 @@ class Admin(commands.Cog):
     @app_commands.describe(
         name="Event to edit",
         new_name="New name for the event",
-        dex_numbers="Replace the dex number list (space/comma-separated)",
+        dex_numbers="Replace the dex number list (space/comma-separated) "
+        f"— use at least {EVENT_MIN_RECOMMENDED_DEX} for a full week without repeats",
         flavor_text="Replace the flavor text",
     )
     @app_commands.autocomplete(name=_all_event_name_autocomplete)
@@ -679,9 +704,12 @@ class Admin(commands.Cog):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_message(
-            f"✅ Updated **{old_name}**: {', '.join(changes)}.", ephemeral=True
-        )
+        msg = f"✅ Updated **{old_name}**: {', '.join(changes)}."
+        if new_dex_list is not None:
+            warning = _short_event_warning(len(new_dex_list))
+            if warning:
+                msg += f"\n{warning}"
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 async def setup(bot: commands.Bot) -> None:
