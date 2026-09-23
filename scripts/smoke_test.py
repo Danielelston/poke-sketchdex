@@ -695,7 +695,7 @@ async def main() -> None:
 
     async with db.session() as s:
         we = await s.get(db.WildEncounter, we_id)
-        confirmation, exp_msg = await subs_cog._submit_to_wild_encounter(
+        confirmation, exp_msg, _gym_result = await subs_cog._submit_to_wild_encounter(
             s, we, _FakeThread(vote_thread_id), _FakeAttachment(), vote_gid, wild_uid, "<@5010>", today
         )
         await s.commit()
@@ -733,7 +733,7 @@ async def main() -> None:
         dedup_daily = (
             await s.execute(select(db.DailyPokemon).where(db.DailyPokemon.guild_id == vote_gid))
         ).scalar_one()
-        confirmation2, exp_msg2 = await subs_cog._submit_to_daily(
+        confirmation2, exp_msg2, _gym_result2 = await subs_cog._submit_to_daily(
             s, dedup_daily, _FakeThread(vote_thread_id + 1), _FakeAttachment(), vote_gid, wild_uid, "<@5010>"
         )
         await s.commit()
@@ -1318,6 +1318,406 @@ async def main() -> None:
     warn_edit_msg = warn_edit_interaction.response.sent["content"]
     assert "⚠️" in warn_edit_msg, warn_edit_msg
     print("event-edit warning OK: appended when a replaced dex list drops under 7")
+
+    # --- Gym Events: contribution damage, defeat/badge awarding, expiry,
+    # the upvote-received daily cap, one-active-event enforcement, the
+    # catches-excluded regression guard, and the real /submit + upvote hooks.
+    from datetime import timedelta as _gym_timedelta
+
+    from sqlalchemy import func
+
+    from pokesketch import gym
+    from pokesketch.cogs.gym import Gym, _hp_bar
+
+    def _make_gym_event(guild_id: int, hp_total: int, *, ends_in_days: int = 7) -> db.GymEvent:
+        now = gym.naive_utcnow()
+        return db.GymEvent(
+            guild_id=guild_id, name="Test Gym", leader_name="Leader",
+            hp_total=hp_total, hp_remaining=hp_total,
+            starts_at=now, ends_at=now + _gym_timedelta(days=ends_in_days),
+            status=gym.STATUS_ACTIVE, badge_name="Test Badge",
+            channel_id=None, created_by=1,
+        )
+
+    assert _hp_bar(100, 100) == "🟩" * 20, _hp_bar(100, 100)
+    assert _hp_bar(0, 100) == "⬜" * 20, _hp_bar(0, 100)
+    assert _hp_bar(-5, 100) == "⬜" * 20, _hp_bar(-5, 100)  # negative HP clamps to empty, not a crash
+    print("gym hp bar OK: full/empty/negative HP all render safely")
+
+    # HP driven to exactly 0 by three distinct contributors -> defeated, each
+    # gets exactly one badge; only the exact call that zeroes HP reports
+    # just_defeated=True.
+    defeat_guild = 20260940
+    a_uid, b_uid, c_uid = 41001, 41002, 41003
+    defeat_hp_total = 2 * gym.GYM_DAMAGE_SUBMIT + gym.GYM_DAMAGE_UPVOTE_RECEIVED
+    async with db.session() as s:
+        s.add(_make_gym_event(defeat_guild, hp_total=defeat_hp_total))
+        await s.commit()
+    async with db.session() as s:
+        r1 = await gym.record_contribution(s, defeat_guild, a_uid, gym.KIND_SUBMIT)
+        r2 = await gym.record_contribution(s, defeat_guild, b_uid, gym.KIND_SUBMIT)
+        r3 = await gym.record_contribution(s, defeat_guild, c_uid, gym.KIND_UPVOTE_RECEIVED)
+        await s.commit()
+        defeat_event_id = r3[0].id
+    assert r1[1] is False and r2[1] is False, (r1, r2)
+    assert r3[1] is True, r3
+    async with db.session() as s:
+        defeat_event = await s.get(db.GymEvent, defeat_event_id)
+        defeat_badges = (
+            await s.execute(select(db.GymBadge).where(db.GymBadge.gym_event_id == defeat_event_id))
+        ).scalars().all()
+    assert defeat_event.status == gym.STATUS_DEFEATED, defeat_event.status
+    assert defeat_event.hp_remaining == 0, defeat_event.hp_remaining
+    assert {b.user_id for b in defeat_badges} == {a_uid, b_uid, c_uid}, {b.user_id for b in defeat_badges}
+    assert len(defeat_badges) == 3, len(defeat_badges)
+    print("gym defeat OK: HP hit exactly 0 across 3 contributors -> defeated, one badge each")
+
+    # A contribution after defeat is a no-op (no active event to attach to),
+    # and re-running the defeat transition directly (the /gym end edge case)
+    # never duplicates a badge.
+    async with db.session() as s:
+        post_defeat_result = await gym.record_contribution(s, defeat_guild, a_uid, gym.KIND_SUBMIT)
+        redefeat_event = await s.get(db.GymEvent, defeat_event_id)
+        await gym.mark_defeated(s, redefeat_event)
+        await s.commit()
+    assert post_defeat_result is None, post_defeat_result
+    async with db.session() as s:
+        badges_after = (
+            await s.execute(select(db.GymBadge).where(db.GymBadge.gym_event_id == defeat_event_id))
+        ).scalars().all()
+    assert len(badges_after) == 3, len(badges_after)
+    print(
+        "gym badge idempotency OK: a post-defeat contribution is a no-op, and re-running the "
+        "defeat transition directly doesn't duplicate anyone's badge"
+    )
+
+    # Daily cap: upvote_received damage stops accruing once it hits
+    # GYM_DAMAGE_UPVOTE_RECEIVED_DAILY_CAP for that user/event/day, mirroring
+    # the EXP upvote-received cap but with its own independent tracking.
+    cap_guild = 20260941
+    cap_uid = 41010
+    async with db.session() as s:
+        s.add(_make_gym_event(cap_guild, hp_total=10_000))
+        await s.commit()
+    cap_iterations = gym.GYM_DAMAGE_UPVOTE_RECEIVED_DAILY_CAP // gym.GYM_DAMAGE_UPVOTE_RECEIVED + 5
+    async with db.session() as s:
+        for _ in range(cap_iterations):
+            await gym.record_contribution(s, cap_guild, cap_uid, gym.KIND_UPVOTE_RECEIVED)
+        await s.commit()
+    async with db.session() as s:
+        cap_total_damage = (
+            await s.execute(
+                select(func.coalesce(func.sum(db.GymContribution.damage), 0)).where(
+                    db.GymContribution.user_id == cap_uid,
+                    db.GymContribution.kind == gym.KIND_UPVOTE_RECEIVED,
+                )
+            )
+        ).scalar_one()
+    assert cap_total_damage == gym.GYM_DAMAGE_UPVOTE_RECEIVED_DAILY_CAP, cap_total_damage
+    print(
+        f"gym upvote-received cap OK: capped at {cap_total_damage} damage/day despite "
+        f"{cap_iterations} attempts"
+    )
+
+    # Expiry: ends_at in the past with HP > 0 -> expired, zero badges, even
+    # for a contributor who chipped some HP off before time ran out. A
+    # still-active event with ends_at in the future is left untouched.
+    expiry_guild = 20260944
+    expiry_uid = 41030
+    async with db.session() as s:
+        expiry_event = _make_gym_event(expiry_guild, hp_total=1000, ends_in_days=-1)
+        s.add(expiry_event)
+        await s.commit()
+        expiry_event_id = expiry_event.id
+        await gym.record_contribution(s, expiry_guild, expiry_uid, gym.KIND_SUBMIT)
+        await s.commit()
+
+    active_guild = 20260945
+    async with db.session() as s:
+        s.add(_make_gym_event(active_guild, hp_total=100, ends_in_days=7))
+        await s.commit()
+
+    async with db.session() as s:
+        expired = await gym.close_expired_gym_events(s)
+        await s.commit()
+    assert any(e.id == expiry_event_id for e in expired), (expiry_event_id, [e.id for e in expired])
+    assert all(e.guild_id != active_guild for e in expired), expired
+    async with db.session() as s:
+        expired_event_after = await s.get(db.GymEvent, expiry_event_id)
+        expiry_badges = (
+            await s.execute(select(db.GymBadge).where(db.GymBadge.gym_event_id == expiry_event_id))
+        ).scalars().all()
+        still_active = await gym.get_active_gym_event(s, active_guild)
+    assert expired_event_after.status == gym.STATUS_EXPIRED, expired_event_after.status
+    assert expired_event_after.hp_remaining > 0, expired_event_after.hp_remaining
+    assert expiry_badges == [], expiry_badges
+    assert still_active is not None and still_active.status == gym.STATUS_ACTIVE, still_active
+    print(
+        "gym expiry OK: a past-ends_at event with HP > 0 -> expired with zero badges; a "
+        "still-active event with a future ends_at is left untouched"
+    )
+
+    # Catches must NOT contribute to gym damage (locked design decision) — a
+    # regression guard against ever wiring gym contributions into /catch.
+    catch_guard_guild = 20260943
+    catch_guard_uid = 41020
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=catch_guard_guild))
+        s.add(_make_gym_event(catch_guard_guild, hp_total=1000))
+        catch_guard_daily = db.DailyPokemon(
+            guild_id=catch_guard_guild, local_date=_date.today(), dex_no=1, name="bulbasaur"
+        )
+        s.add(catch_guard_daily)
+        await s.commit()
+        s.add(
+            db.Submission(
+                guild_id=catch_guard_guild, user_id=catch_guard_uid, daily_id=catch_guard_daily.id,
+                image_url="https://example.invalid/catchguard.png",
+            )
+        )
+        await s.commit()
+    async with db.session() as s:
+        await pokebox.catch_submission(s, catch_guard_uid, party_dir)
+        await s.commit()
+    async with db.session() as s:
+        catch_guard_contributions = (
+            await s.execute(select(db.GymContribution).where(db.GymContribution.user_id == catch_guard_uid))
+        ).scalars().all()
+    assert catch_guard_contributions == [], catch_guard_contributions
+    print("gym catches-excluded OK: /catch never logs a GymContribution even with an active gym event")
+
+    # Real /submit hook: the shared _award_submission_rewards path (not a
+    # direct gym.record_contribution call) logs a GymContribution and
+    # decrements HP for both the main-daily and upvote-given/-received paths.
+    hook_guild = 20260950
+    hook_uid = 41060
+    async with db.session() as s:
+        s.add(_make_gym_event(hook_guild, hp_total=1000))
+        hook_daily = db.DailyPokemon(guild_id=hook_guild, local_date=_date.today(), dex_no=1, name="bulbasaur")
+        s.add(hook_daily)
+        await s.commit()
+        _hook_confirm, _hook_exp, hook_gym_result = await subs_cog._submit_to_daily(
+            s, hook_daily, _FakeThread(90001), _FakeAttachment(), hook_guild, hook_uid, "<@41060>"
+        )
+        await s.commit()
+    assert hook_gym_result is not None and hook_gym_result[1] is False, hook_gym_result
+    async with db.session() as s:
+        hook_event = await gym.get_active_gym_event(s, hook_guild)
+        hook_contributions = (
+            await s.execute(select(db.GymContribution).where(db.GymContribution.gym_event_id == hook_event.id))
+        ).scalars().all()
+    assert hook_event.hp_remaining == 1000 - gym.GYM_DAMAGE_SUBMIT, hook_event.hp_remaining
+    assert len(hook_contributions) == 1 and hook_contributions[0].kind == gym.KIND_SUBMIT, hook_contributions
+    print("gym submit-hook OK: a real /submit (main daily) logs a GymContribution and decrements HP")
+
+    async with db.session() as s:
+        hook_sub_row = db.Submission(
+            guild_id=hook_guild, user_id=hook_uid, daily_id=hook_daily.id,
+            image_url="https://example.invalid/hook.png",
+        )
+        s.add(hook_sub_row)
+        await s.flush()
+        received_result = await Submissions._maybe_award_upvote_received_exp(s, hook_sub_row)
+        given_result = await Submissions._maybe_award_upvote_given_exp(s, hook_guild, 41061)
+        await s.commit()
+    assert received_result is not None and received_result[1] is False, received_result
+    assert given_result is not None and given_result[1] is False, given_result
+    async with db.session() as s:
+        hook_event_after_upvotes = await gym.get_active_gym_event(s, hook_guild)
+    expected_hook_hp = 1000 - gym.GYM_DAMAGE_SUBMIT - gym.GYM_DAMAGE_UPVOTE_RECEIVED - gym.GYM_DAMAGE_UPVOTE_GIVEN
+    assert hook_event_after_upvotes.hp_remaining == expected_hook_hp, (
+        hook_event_after_upvotes.hp_remaining, expected_hook_hp
+    )
+    print("gym upvote-hooks OK: both upvote_received and upvote_given feed gym damage independently of EXP caps")
+
+    # gym.announce_defeat: posts a defeat embed to the event's stored channel,
+    # and no-ops gracefully (no crash) when channel_id is unset.
+    class _FakeAnnounceChannel:
+        def __init__(self, channel_id: int):
+            self.id = channel_id
+            self.sent: list[dict] = []
+
+        async def send(self, **kwargs):
+            self.sent.append(kwargs)
+
+    class _FakeAnnounceClient:
+        def __init__(self, channel):
+            self._channel = channel
+
+        def get_channel(self, cid):
+            return self._channel if cid == self._channel.id else None
+
+        async def fetch_channel(self, cid):
+            raise AssertionError("fetch_channel should not be called when get_channel already found it")
+
+    announce_channel = _FakeAnnounceChannel(777001)
+    announce_client = _FakeAnnounceClient(announce_channel)
+    announce_event = _make_gym_event(20260951, hp_total=10)
+    announce_event.channel_id = announce_channel.id
+    announce_event.badge_name = "Announce Badge"
+    await gym.announce_defeat(announce_client, announce_event)
+    assert len(announce_channel.sent) == 1, announce_channel.sent
+    announce_embed = announce_channel.sent[0]["embed"]
+    assert "Announce Badge" in announce_embed.description, announce_embed.description
+    print("gym announce_defeat OK: posts a defeat embed to the event's stored channel")
+
+    no_channel_event = _make_gym_event(20260952, hp_total=10)
+    no_channel_event.channel_id = None
+    await gym.announce_defeat(announce_client, no_channel_event)  # must not raise
+    assert announce_channel.sent == [announce_channel.sent[0]], "no-channel event must not post anything"
+    print("gym announce_defeat OK: a missing channel_id is a graceful no-op, not a crash")
+
+    # /gym commands end-to-end via the real cog callbacks (mirrors the
+    # _FakeAdminInteraction pattern used for the /event-* commands above).
+    class _FakeGymUser:
+        def __init__(self, uid: int = 1, display_name: str = "gym-tester"):
+            self.id = uid
+            self.display_name = display_name
+
+    class _FakeGymInteraction:
+        def __init__(self, guild_id: int, channel_id: int = 1, user_id: int = 1):
+            self.guild_id = guild_id
+            self.channel_id = channel_id
+            self.user = _FakeGymUser(user_id)
+            self.response = _FakeAdminResponse()
+
+    gym_cog = Gym(bot=None)
+
+    # Only one active GymEvent per guild — /gym start while one is already
+    # active errors cleanly and does not create a second row.
+    onegym_guild = 20260942
+    first_start = _FakeGymInteraction(onegym_guild, channel_id=555001)
+    await gym_cog.gym_start.callback(
+        gym_cog, first_start, name="First Gym", leader_name="Leader One",
+        hp_total=100, duration_days=3, badge_name="First Badge",
+    )
+    assert first_start.response.sent.get("embed") is not None, first_start.response.sent
+    _assert_embed_within_discord_limits(first_start.response.sent["embed"])
+
+    second_start = _FakeGymInteraction(onegym_guild, channel_id=555002)
+    await gym_cog.gym_start.callback(
+        gym_cog, second_start, name="Second Gym", leader_name="Leader Two",
+        hp_total=50, duration_days=3, badge_name="Second Badge",
+    )
+    second_start_msg = second_start.response.sent.get("content")
+    assert second_start_msg is not None and "still active" in second_start_msg, second_start.response.sent
+    async with db.session() as s:
+        onegym_active = (
+            await s.execute(
+                select(db.GymEvent).where(
+                    db.GymEvent.guild_id == onegym_guild, db.GymEvent.status == gym.STATUS_ACTIVE
+                )
+            )
+        ).scalars().all()
+    assert len(onegym_active) == 1 and onegym_active[0].name == "First Gym", onegym_active
+    print("gym one-active-event OK: /gym start while one is active is rejected cleanly, no second row created")
+
+    # /gym end: HP > 0 -> cancelled, no badges.
+    end_guild = 20260946
+    async with db.session() as s:
+        s.add(_make_gym_event(end_guild, hp_total=500))
+        await s.commit()
+    end_interaction = _FakeGymInteraction(end_guild)
+    await gym_cog.gym_end.callback(gym_cog, end_interaction)
+    assert "ended early" in end_interaction.response.sent["content"], end_interaction.response.sent
+    async with db.session() as s:
+        ended_event = (
+            await s.execute(select(db.GymEvent).where(db.GymEvent.guild_id == end_guild))
+        ).scalar_one()
+        end_badges = (
+            await s.execute(select(db.GymBadge).where(db.GymBadge.gym_event_id == ended_event.id))
+        ).scalars().all()
+    assert ended_event.status == gym.STATUS_CANCELLED, ended_event.status
+    assert end_badges == [], end_badges
+    print("gym end OK: manual early end with HP > 0 -> cancelled, no badges")
+
+    # /gym end edge case: HP already <= 0 but never transitioned (e.g. a crash
+    # between the decrement and the status flip) -> handled as a defeat.
+    edge_guild = 20260947
+    edge_uid = 41040
+    async with db.session() as s:
+        edge_event = _make_gym_event(edge_guild, hp_total=10)
+        edge_event.hp_remaining = 0
+        s.add(edge_event)
+        await s.commit()
+        edge_event_id = edge_event.id
+        s.add(db.GymContribution(gym_event_id=edge_event_id, user_id=edge_uid, kind=gym.KIND_SUBMIT, damage=10))
+        await s.commit()
+    edge_interaction = _FakeGymInteraction(edge_guild)
+    await gym_cog.gym_end.callback(gym_cog, edge_interaction)
+    assert "already fallen" in edge_interaction.response.sent["content"], edge_interaction.response.sent
+    async with db.session() as s:
+        edge_event_after = await s.get(db.GymEvent, edge_event_id)
+        edge_badges = (
+            await s.execute(select(db.GymBadge).where(db.GymBadge.gym_event_id == edge_event_id))
+        ).scalars().all()
+    assert edge_event_after.status == gym.STATUS_DEFEATED, edge_event_after.status
+    assert {b.user_id for b in edge_badges} == {edge_uid}, edge_badges
+    print("gym end edge case OK: HP already <= 0 but unprocessed is handled gracefully as a defeat with badges")
+
+    noevent_interaction = _FakeGymInteraction(20260948)
+    await gym_cog.gym_end.callback(gym_cog, noevent_interaction)
+    assert "No active gym event" in noevent_interaction.response.sent["content"], noevent_interaction.response.sent
+    print("gym end OK: no active event -> clean error, not a crash")
+
+    # /gym status: HP bar, time remaining, and top contributors reflect live contributions.
+    status_guild = 20260949
+    status_uid1, status_uid2 = 41050, 41051
+    async with db.session() as s:
+        s.add(_make_gym_event(status_guild, hp_total=100))
+        await s.commit()
+        await gym.record_contribution(s, status_guild, status_uid1, gym.KIND_SUBMIT)
+        await gym.record_contribution(s, status_guild, status_uid2, gym.KIND_UPVOTE_GIVEN)
+        await s.commit()
+    status_interaction = _FakeGymInteraction(status_guild)
+    await gym_cog.gym_status.callback(gym_cog, status_interaction)
+    status_embed = status_interaction.response.sent["embed"]
+    _assert_embed_within_discord_limits(status_embed)
+    status_hp_field = next(f for f in status_embed.fields if f.name == "HP")
+    expected_status_hp = 100 - gym.GYM_DAMAGE_SUBMIT - gym.GYM_DAMAGE_UPVOTE_GIVEN
+    assert f"{expected_status_hp} / 100 HP" in status_hp_field.value, status_hp_field.value
+    status_contributors_field = next(f for f in status_embed.fields if f.name == "Top contributors")
+    assert f"<@{status_uid1}>" in status_contributors_field.value, status_contributors_field.value
+    assert f"<@{status_uid2}>" in status_contributors_field.value, status_contributors_field.value
+    print("gym status OK: HP/time-remaining/top-contributors embed reflects live contributions")
+
+    no_status_interaction = _FakeGymInteraction(20260953)
+    await gym_cog.gym_status.callback(gym_cog, no_status_interaction)
+    assert "No active gym event" in no_status_interaction.response.sent["content"], no_status_interaction.response.sent
+    print("gym status OK: no active event -> clean message, not a crash")
+
+    # /gym badges: a contributor from the earlier defeat scenario sees their
+    # badge; a player with none gets a clean message.
+    badges_interaction = _FakeGymInteraction(defeat_guild)
+    await gym_cog.gym_badges.callback(gym_cog, badges_interaction, user=_FakeGymUser(a_uid, "A"))
+    badges_embed = badges_interaction.response.sent["embed"]
+    assert "Test Badge" in badges_embed.description and "Leader" in badges_embed.description, badges_embed.description
+    print("gym badges OK: earned badge listed with badge name, leader, and event name")
+
+    no_badges_interaction = _FakeGymInteraction(defeat_guild)
+    await gym_cog.gym_badges.callback(gym_cog, no_badges_interaction, user=_FakeGymUser(999999, "Nobody"))
+    assert "hasn't earned any gym badges yet" in no_badges_interaction.response.sent["content"], (
+        no_badges_interaction.response.sent
+    )
+    print("gym badges OK: a player with none gets a clean message, not a crash")
+
+    # /help + /help-admin: gym commands are documented and both embeds stay
+    # within Discord's limits with the new fields added.
+    help_cog2 = Help(bot=None)
+    help_interaction2 = _FakeHelpInteraction()
+    await help_cog2.help_cmd.callback(help_cog2, help_interaction2)
+    help_embed2 = help_interaction2.response.sent_embed
+    _assert_embed_within_discord_limits(help_embed2)
+    help_text2 = "\n".join(f.value for f in help_embed2.fields)
+    assert "/gym status" in help_text2 and "/gym badges" in help_text2, help_text2
+
+    admin_interaction2 = _FakeHelpInteraction()
+    await help_cog2.help_admin_cmd.callback(help_cog2, admin_interaction2)
+    admin_embed2 = admin_interaction2.response.sent_embed
+    _assert_embed_within_discord_limits(admin_embed2)
+    admin_text2 = "\n".join(f.value for f in admin_embed2.fields)
+    assert "/gym start" in admin_text2 and "/gym end" in admin_text2, admin_text2
+    print("gym help OK: /gym start /gym end documented in /help-admin, /gym status /gym badges in /help")
 
     print("ALL SMOKE TESTS PASSED")
 
