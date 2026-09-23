@@ -12,14 +12,17 @@ import asyncio
 import io
 import logging
 import os
+import re
 from datetime import UTC, datetime, timedelta
+from math import ceil
 
 import httpx
 from PIL import Image, ImageOps
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from .db import CaughtMon, GlobalUser, PokeballWallet, PokeBox, Submission
+from .db import CaughtMon, GlobalUser, GuildConfig, PokeballWallet, PokeBox, Submission
+from .formatting import species_display_name
 
 log = logging.getLogger(__name__)
 
@@ -50,8 +53,33 @@ GENERATIONS = [
 ]
 
 
+NICKNAME_MAX_LEN = 12
+_NICKNAME_RE = re.compile(r"^[A-Za-z0-9 '.\-]+$")
+
+
 class CatchError(Exception):
     """Expected, user-facing failure — caller should show `str(exc)` as a plain error."""
+
+
+def sanitize_nickname(raw: str) -> str | None:
+    """Validate and normalize a /catch nickname. Raises CatchError on rejection.
+
+    Single choke point for nickname rules (e.g. a future language filter bolts
+    on here without touching call sites). Rejects disallowed characters rather
+    than silently stripping them, so a saved nickname never differs from what
+    the player typed. Empty after stripping whitespace means "no nickname".
+    """
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    if len(stripped) > NICKNAME_MAX_LEN:
+        raise CatchError(f"Nickname must be {NICKNAME_MAX_LEN} characters or fewer.")
+    if not _NICKNAME_RE.match(stripped):
+        raise CatchError(
+            "Nickname can only contain letters, numbers, spaces, and ' . - "
+            "(no backticks, @, #, <, >, :, or other special characters)."
+        )
+    return stripped
 
 
 async def get_or_create_wallet(s, user_id: int) -> PokeballWallet:
@@ -91,19 +119,68 @@ async def pokebox_by_generation(s, user_id: int) -> list[tuple[str, int, int]]:
     return out
 
 
-async def _todays_submission(s, user_id: int) -> Submission | None:
-    """Most recent submission by this user created today (UTC) — the /catch window."""
-    return (
-        await s.execute(
-            select(Submission)
-            .options(selectinload(Submission.daily))
-            .where(
-                Submission.user_id == user_id,
-                func.date(Submission.created_at) == func.date(func.now()),
+def _naive_utcnow() -> datetime:
+    """UTC now with tzinfo stripped.
+
+    SQLite round-trips DateTime(timezone=True) columns as naive text (a
+    SQLAlchemy+SQLite limitation), so `Submission.created_at` comes back
+    naive even though it was written as UTC-aware — compare against this
+    instead of an aware `datetime.now(UTC)` to avoid a naive/aware TypeError.
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+async def catchable_submissions(s, user_id: int) -> list[tuple[Submission, int]]:
+    """All of this user's eligible, not-yet-caught submissions across every guild
+    (catching is global/cross-guild by design), most recent first.
+
+    Each result is paired with that submission's own guild's catch_window_hours
+    (a submission's eligibility is judged against its own guild's setting, not
+    a single global value, since different guilds can configure different
+    windows). Excludes submissions already pointed at by a CaughtMon via
+    source_submission_id, so the same sketch can't be caught twice.
+    """
+    now = _naive_utcnow()
+    caught_ids = set(
+        (
+            await s.execute(
+                select(CaughtMon.source_submission_id).where(
+                    CaughtMon.user_id == user_id, CaughtMon.source_submission_id.is_not(None)
+                )
             )
+        ).scalars().all()
+    )
+    rows = (
+        await s.execute(
+            select(Submission, GuildConfig.catch_window_hours)
+            .join(GuildConfig, GuildConfig.guild_id == Submission.guild_id)
+            .options(selectinload(Submission.daily))
+            .where(Submission.user_id == user_id)
             .order_by(Submission.id.desc())
         )
-    ).scalars().first()
+    ).all()
+    out: list[tuple[Submission, int]] = []
+    for sub, catch_window_hours in rows:
+        if sub.id in caught_ids:
+            continue
+        if sub.created_at >= now - timedelta(hours=catch_window_hours):
+            out.append((sub, catch_window_hours))
+    return out
+
+
+def catch_label_parts(sub: Submission, catch_window_hours: int) -> tuple[str, str, str]:
+    """Return (species display name, relative day label, time-left label) for a
+    /catch autocomplete choice, e.g. ("Pikachu", "today", "18h left")."""
+    now = _naive_utcnow()
+    expires_at = sub.created_at + timedelta(hours=catch_window_hours)
+    remaining_hours = (expires_at - now).total_seconds() / 3600
+    if remaining_hours < 24:
+        time_left = f"{max(1, ceil(remaining_hours))}h left"
+    else:
+        time_left = f"{ceil(remaining_hours / 24)}d left"
+    created_date = sub.created_at.date()
+    day_label = "today" if created_date == now.date() else f"{created_date:%b} {created_date.day}"
+    return species_display_name(sub.daily.name), day_label, time_left
 
 
 def _next_free_slot(taken: set[int], upper: int) -> int | None:
@@ -149,19 +226,45 @@ def delete_cached_file(path: str) -> None:
             pass
 
 
-async def catch_todays_submission(s, user_id: int, cache_dir: str) -> CaughtMon:
-    """Spend 1 pokeball to catch today's just-submitted Pokemon.
+async def catch_submission(
+    s,
+    user_id: int,
+    cache_dir: str,
+    target_submission_id: int | None = None,
+    nickname: str | None = None,
+) -> CaughtMon:
+    """Spend 1 pokeball to catch an eligible, not-yet-caught submission.
 
-    Raises CatchError for any expected failure (no pokeballs, no submission
-    today, storage full) — caller shows the message as a plain error.
+    With no target, catches the user's single most recent eligible submission
+    (same UX as before, widened from "today only" to each guild's catch
+    window). With a target, always re-resolves it against the live eligible
+    set at execution time — Discord doesn't guarantee a submitted `target`
+    string actually came from the autocomplete list, and the window could
+    have lapsed or a concurrent request could have caught it in between.
+
+    Raises CatchError for any expected failure (no pokeballs, no eligible
+    submission, stale/invalid target, bad nickname, storage full) — caller
+    shows the message as a plain error.
     """
     wallet = await get_or_create_wallet(s, user_id)
     if wallet.balance <= 0:
         raise CatchError("No pokeballs left. Check `/pokeballs` for your next weekly grant.")
 
-    sub = await _todays_submission(s, user_id)
-    if sub is None:
-        raise CatchError("No sketch submitted today yet — `/submit` first, then `/catch`.")
+    eligible = await catchable_submissions(s, user_id)
+    if target_submission_id is None:
+        if not eligible:
+            raise CatchError("No catchable sketches right now — `/submit` first, then `/catch`.")
+        sub, _ = eligible[0]
+    else:
+        match = next((e for e in eligible if e[0].id == target_submission_id), None)
+        if match is None:
+            raise CatchError(
+                "That sketch is no longer catchable — it may be outside the window or "
+                "already caught. Run `/catch` again to see current options."
+            )
+        sub, _ = match
+
+    clean_nickname = sanitize_nickname(nickname) if nickname is not None else None
 
     rows = (await s.execute(select(CaughtMon).where(CaughtMon.user_id == user_id))).scalars().all()
     if len(rows) >= MAX_TOTAL:
@@ -185,6 +288,7 @@ async def catch_todays_submission(s, user_id: int, cache_dir: str) -> CaughtMon:
         dex_no=sub.daily.dex_no,
         name=sub.daily.name,
         is_shiny=sub.daily.is_shiny,
+        nickname=clean_nickname,
         cached_image_path="",
         source_submission_id=sub.id,
     )
