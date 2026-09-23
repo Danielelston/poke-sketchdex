@@ -53,15 +53,20 @@ def _window_summary_line(local_date: date, grace_period_days: int, catch_window_
     keeps ticking with no bot-side re-editing needed — see the Obsidian design
     doc for why a static ASCII bar was rejected: it can't reflect elapsed time).
     The submit deadline is a concrete guild-local-midnight cutoff for this
-    specific thread; the catch window is stated as a duration since it's
-    reset fresh by each individual /submit, not a single thread-wide deadline."""
+    specific thread. The catch window is stated as "closes Nh/Nd after it's
+    submitted" (a per-submission duration, not a shared deadline) because it
+    resets fresh at each individual /submit's own created_at — NOT at the
+    thread's post time — so a late submitter (right up to the submit deadline)
+    still gets their own full catch window, which correctly extends past the
+    submit deadline shown here (see catch_label_parts/pokebox.catchable_submissions
+    and the "late submitter" smoke test in scripts/smoke_test.py)."""
     submit_deadline = pokebox.discord_timestamp(
         _submit_deadline_utc(local_date, grace_period_days, tz_name), style="R"
     )
     catch_label = pokebox.format_duration_label(catch_window_hours)
     return (
         f"⏳ `/submit` closes for this thread {submit_deadline} • "
-        f"each sketch is then catchable via `/catch` for {catch_label} from when it's submitted."
+        f"`/catch` closes {catch_label} after each sketch is submitted."
     )
 
 
@@ -77,7 +82,7 @@ def _wild_encounter_window_summary_line(local_date: date, catch_window_hours: in
     catch_label = pokebox.format_duration_label(catch_window_hours)
     return (
         f"⏳ `/submit` only works here until {submit_deadline} (today only, no backfill) • "
-        f"each sketch is then catchable via `/catch` for {catch_label} from when it's submitted."
+        f"`/catch` closes {catch_label} after each sketch is submitted."
     )
 
 
