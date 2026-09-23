@@ -951,7 +951,16 @@ async def main() -> None:
     # builders directly, then exercise the real command handlers end-to-end
     # and validate the assembled embeds against every one of Discord's actual
     # embed limits, so a future appended command trips this test, not prod.
-    from pokesketch.cogs.help import DISCORD_EMBED_FIELD_LIMIT, Help, _exp_field_value
+    from pokesketch.cogs.help import Help, _exp_field_value
+    from pokesketch.discord_limits import (
+        DISCORD_EMBED_DESCRIPTION_LIMIT,
+        DISCORD_EMBED_FIELD_LIMIT,
+        DISCORD_EMBED_FIELD_NAME_LIMIT,
+        DISCORD_EMBED_FOOTER_LIMIT,
+        DISCORD_EMBED_MAX_FIELDS,
+        DISCORD_EMBED_TITLE_LIMIT,
+        DISCORD_EMBED_TOTAL_LIMIT,
+    )
 
     assert len(_exp_field_value()) <= DISCORD_EMBED_FIELD_LIMIT, len(_exp_field_value())
     for group_name, group_value in _admin_field_groups():
@@ -980,19 +989,22 @@ async def main() -> None:
             self.response = _FakeHelpResponse()
 
     def _assert_embed_within_discord_limits(embed) -> int:
+        """Validate a real discord.Embed against every one of Discord's actual
+        embed limits (sourced from discord_limits.py, not re-hardcoded here).
+        Shared by /help, /help-admin, /event-list, and /event-view checks."""
         title = embed.title or ""
         description = embed.description or ""
         footer_text = embed.footer.text if embed.footer else ""
-        assert len(title) <= 256, len(title)
-        assert len(description) <= 4096, len(description)
-        assert len(embed.fields) <= 25, len(embed.fields)
-        assert len(footer_text) <= 2048, len(footer_text)
+        assert len(title) <= DISCORD_EMBED_TITLE_LIMIT, len(title)
+        assert len(description) <= DISCORD_EMBED_DESCRIPTION_LIMIT, len(description)
+        assert len(embed.fields) <= DISCORD_EMBED_MAX_FIELDS, len(embed.fields)
+        assert len(footer_text) <= DISCORD_EMBED_FOOTER_LIMIT, len(footer_text)
         total = len(title) + len(description) + len(footer_text)
         for field in embed.fields:
-            assert len(field.name) <= 256, (field.name, len(field.name))
+            assert len(field.name) <= DISCORD_EMBED_FIELD_NAME_LIMIT, (field.name, len(field.name))
             assert len(field.value) <= DISCORD_EMBED_FIELD_LIMIT, (field.name, len(field.value))
             total += len(field.name) + len(field.value)
-        assert total <= 6000, total
+        assert total <= DISCORD_EMBED_TOTAL_LIMIT, total
         return total
 
     help_cog = Help(bot=None)
@@ -1016,6 +1028,208 @@ async def main() -> None:
         f"{[len(f.value) for f in help_embed.fields]} chars each, {help_total} total "
         "(all within Discord's embed limits)"
     )
+
+    # --- Event admin system: /event-list pagination, /event-view truncation,
+    # /event-create cap enforcement, /event-edit partial updates, /event-enable.
+    # Every check below drives the real cog command callback end-to-end (not a
+    # unit test of a helper), with a mocked Interaction that captures whatever
+    # kwarg the handler passed to interaction.response.send_message.
+    from pokesketch.cogs.admin import (
+        EVENT_LIST_PAGE_SIZE,
+        EVENT_MAX_DEX_NUMBERS,
+        EVENT_NAME_MAX_LEN,
+        MAX_EVENTS_PER_GUILD,
+        Admin,
+    )
+    from pokesketch.discord_limits import DISCORD_EMBED_FIELD_VALUE_LIMIT
+
+    # _parse_dex_numbers' EVENT_MAX_DEX_NUMBERS cap (shared by /event-create and /event-edit).
+    try:
+        _parse_dex_numbers(" ".join(str(n) for n in range(1, EVENT_MAX_DEX_NUMBERS + 2)))
+        raise AssertionError("expected ValueError for a dex list over the per-event cap")
+    except ValueError as exc:
+        assert str(EVENT_MAX_DEX_NUMBERS) in str(exc), exc
+    print(f"event dex-count cap OK: {EVENT_MAX_DEX_NUMBERS + 1} distinct numbers rejected cleanly")
+
+    class _FakeAdminUser:
+        def __init__(self, uid: int = 1):
+            self.id = uid
+
+    class _FakeAdminResponse:
+        def __init__(self):
+            self.sent: dict | None = None
+
+        async def send_message(self, content=None, **kwargs):
+            self.sent = {"content": content, **kwargs}
+
+    class _FakeAdminMessage:
+        id = 999999
+
+    class _FakeAdminInteraction:
+        def __init__(self, guild_id: int, user_id: int = 1):
+            self.guild_id = guild_id
+            self.user = _FakeAdminUser(user_id)
+            self.response = _FakeAdminResponse()
+
+        async def original_response(self):
+            return _FakeAdminMessage()
+
+    admin_cog = Admin(bot=None)
+
+    # /event-create: MAX_EVENTS_PER_GUILD cap actually rejects the (cap+1)th event.
+    cap_guild = 20260923
+    async with db.session() as s:
+        for i in range(MAX_EVENTS_PER_GUILD):
+            s.add(db.EventDefinition(guild_id=cap_guild, name=f"Cap Event {i}", dex_list="1", created_by=1))
+        await s.commit()
+
+    cap_interaction = _FakeAdminInteraction(cap_guild)
+    await admin_cog.event_create.callback(admin_cog, cap_interaction, name="One Too Many", dex_numbers="1")
+    cap_msg = cap_interaction.response.sent["content"]
+    assert str(MAX_EVENTS_PER_GUILD) in cap_msg, cap_msg
+    async with db.session() as s:
+        count_after = len(
+            (await s.execute(select(db.EventDefinition).where(db.EventDefinition.guild_id == cap_guild)))
+            .scalars().all()
+        )
+    assert count_after == MAX_EVENTS_PER_GUILD, count_after
+    print(f"event-create cap OK: {MAX_EVENTS_PER_GUILD}th event blocked cleanly — {cap_msg!r}")
+
+    # /event-create: case-insensitive duplicate name and over-length name both rejected.
+    name_guild = 20260927
+    async with db.session() as s:
+        s.add(db.EventDefinition(guild_id=name_guild, name="Existing Event", dex_list="1", created_by=1))
+        await s.commit()
+    dup_interaction = _FakeAdminInteraction(name_guild)
+    await admin_cog.event_create.callback(admin_cog, dup_interaction, name="existing event", dex_numbers="2")
+    dup_msg = dup_interaction.response.sent["content"]
+    assert "already exists" in dup_msg.lower(), dup_msg
+    long_interaction = _FakeAdminInteraction(name_guild)
+    await admin_cog.event_create.callback(
+        admin_cog, long_interaction, name="X" * (EVENT_NAME_MAX_LEN + 1), dex_numbers="3"
+    )
+    long_msg = long_interaction.response.sent["content"]
+    assert str(EVENT_NAME_MAX_LEN) in long_msg, long_msg
+    print("event-create validation OK: case-insensitive duplicate name and over-length name both rejected")
+
+    # /event-list: pagination actually kicks in past EVENT_LIST_PAGE_SIZE events, and every
+    # page's embed stays within every Discord embed limit.
+    list_guild = 20260924
+    async with db.session() as s:
+        for i in range(40):
+            s.add(
+                db.EventDefinition(
+                    guild_id=list_guild, name=f"Event {i:02d}", dex_list="1", created_by=1,
+                    is_active=(i % 2 == 0),
+                )
+            )
+        await s.commit()
+    list_interaction = _FakeAdminInteraction(list_guild)
+    await admin_cog.event_list.callback(admin_cog, list_interaction)
+    list_sent = list_interaction.response.sent
+    assert list_sent.get("view") is not None, list_sent
+    pages = list_sent["view"].pages
+    expected_pages = -(-40 // EVENT_LIST_PAGE_SIZE)
+    assert len(pages) == expected_pages and len(pages) > 1, (len(pages), expected_pages)
+    for page in pages:
+        _assert_embed_within_discord_limits(page)
+    print(
+        f"event-list pagination OK: 40 events -> {len(pages)} pages of <= {EVENT_LIST_PAGE_SIZE} each, "
+        "all page embeds within Discord's embed limits"
+    )
+
+    # /event-view: a 200-number (cap) dex list truncates to fit under the field value limit,
+    # with a "… (+N more)" suffix, and the whole embed stays within every embed limit.
+    view_guild = 20260925
+    huge_dex = list(range(1, EVENT_MAX_DEX_NUMBERS + 1))
+    async with db.session() as s:
+        s.add(
+            db.EventDefinition(
+                guild_id=view_guild, name="Huge Event",
+                dex_list="\n".join(str(n) for n in huge_dex), created_by=1,
+                flavor_text="Testing truncation",
+            )
+        )
+        await s.commit()
+    view_interaction = _FakeAdminInteraction(view_guild)
+    await admin_cog.event_view.callback(admin_cog, view_interaction, name="Huge Event")
+    view_embed = view_interaction.response.sent["embed"]
+    _assert_embed_within_discord_limits(view_embed)
+    dex_field = next(f for f in view_embed.fields if f.name == "Dex numbers")
+    assert len(dex_field.value) <= DISCORD_EMBED_FIELD_VALUE_LIMIT, len(dex_field.value)
+    assert "more)" in dex_field.value, dex_field.value
+    print(
+        f"event-view truncation OK: {len(huge_dex)}-entry dex list (at the cap) rendered as "
+        f"{len(dex_field.value)} chars (<= {DISCORD_EMBED_FIELD_VALUE_LIMIT}), ends with "
+        f"'{dex_field.value[-24:]}'"
+    )
+
+    # /event-edit: updates only the fields provided, and rejects "no fields" / duplicate-name.
+    edit_guild = 20260926
+    async with db.session() as s:
+        s.add(db.EventDefinition(guild_id=edit_guild, name="Alpha", dex_list="1\n2", created_by=1, flavor_text="orig"))
+        s.add(db.EventDefinition(guild_id=edit_guild, name="Beta", dex_list="3", created_by=1))
+        await s.commit()
+
+    noop_interaction = _FakeAdminInteraction(edit_guild)
+    await admin_cog.event_edit.callback(admin_cog, noop_interaction, name="Alpha")
+    noop_msg = noop_interaction.response.sent["content"]
+    assert "at least one" in noop_msg.lower(), noop_msg
+
+    dup_edit_interaction = _FakeAdminInteraction(edit_guild)
+    await admin_cog.event_edit.callback(admin_cog, dup_edit_interaction, name="Alpha", new_name="Beta")
+    dup_edit_msg = dup_edit_interaction.response.sent["content"]
+    assert "already exists" in dup_edit_msg.lower(), dup_edit_msg
+    async with db.session() as s:
+        alpha = (
+            await s.execute(
+                select(db.EventDefinition).where(
+                    db.EventDefinition.guild_id == edit_guild, db.EventDefinition.name == "Alpha"
+                )
+            )
+        ).scalar_one()
+    assert alpha.name == "Alpha", "duplicate-name rename must not apply"
+
+    dex_edit_interaction = _FakeAdminInteraction(edit_guild)
+    await admin_cog.event_edit.callback(admin_cog, dex_edit_interaction, name="Alpha", dex_numbers="5 6 7")
+    dex_edit_msg = dex_edit_interaction.response.sent["content"]
+    assert "dex list now 3 Pokemon" in dex_edit_msg, dex_edit_msg
+    assert "renamed" not in dex_edit_msg and "flavor text updated" not in dex_edit_msg, dex_edit_msg
+    async with db.session() as s:
+        alpha = (
+            await s.execute(
+                select(db.EventDefinition).where(
+                    db.EventDefinition.guild_id == edit_guild, db.EventDefinition.name == "Alpha"
+                )
+            )
+        ).scalar_one()
+    assert alpha.dex_numbers == [5, 6, 7], alpha.dex_numbers
+    assert alpha.flavor_text == "orig", alpha.flavor_text
+    print(f"event-edit OK: no-fields and duplicate-name both rejected, partial update applied — {dex_edit_msg!r}")
+
+    # /event-enable: mirrors /event-disable, flips a disabled event back to active.
+    enable_guild = 20260928
+    async with db.session() as s:
+        s.add(
+            db.EventDefinition(
+                guild_id=enable_guild, name="Retro Event", dex_list="1", created_by=1, is_active=False
+            )
+        )
+        await s.commit()
+    enable_interaction = _FakeAdminInteraction(enable_guild)
+    await admin_cog.event_enable.callback(admin_cog, enable_interaction, name="Retro Event")
+    enable_msg = enable_interaction.response.sent["content"]
+    assert "Re-enabled" in enable_msg, enable_msg
+    async with db.session() as s:
+        retro = (
+            await s.execute(
+                select(db.EventDefinition).where(
+                    db.EventDefinition.guild_id == enable_guild, db.EventDefinition.name == "Retro Event"
+                )
+            )
+        ).scalar_one()
+    assert retro.is_active is True, retro.is_active
+    print(f"event-enable OK: {enable_msg}")
 
     print("ALL SMOKE TESTS PASSED")
 
