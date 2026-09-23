@@ -103,6 +103,65 @@ async def main() -> None:
         f"global={global_user.exp}"
     )
 
+    # Upvote EXP: receiving and giving are separate, each with its own daily cap.
+    from datetime import date as _uv_date
+
+    from sqlalchemy import func as _uv_func
+
+    from pokesketch.cogs.submissions import Submissions
+
+    recv_uid, giver_uid = 9001, 9002
+    guild_id = 999
+    async with db.session() as s:
+        daily_uv = db.DailyPokemon(guild_id=guild_id, local_date=_uv_date.today(), dex_no=1, name="bulbasaur")
+        s.add(daily_uv)
+        await s.commit()
+        sub_uv = db.Submission(
+            guild_id=guild_id, user_id=recv_uid, daily_id=daily_uv.id,
+            image_url="https://example.invalid/uv.png",
+        )
+        s.add(sub_uv)
+        await s.flush()
+        # Award well past both caps' worth of upvotes to confirm each cap holds
+        # independently (received cap: EXP_UPVOTE_RECEIVED_DAILY_CAP; given cap:
+        # EXP_UPVOTE_GIVEN_DAILY_CAP) — more iterations than either cap allows.
+        iterations = max(
+            leveling.EXP_UPVOTE_RECEIVED_DAILY_CAP // leveling.EXP_PER_UPVOTE_RECEIVED,
+            leveling.EXP_UPVOTE_GIVEN_DAILY_CAP // leveling.EXP_PER_UPVOTE_GIVEN,
+        ) + 5
+        for _ in range(iterations):
+            await Submissions._maybe_award_upvote_received_exp(s, sub_uv)
+            await Submissions._maybe_award_upvote_given_exp(s, guild_id, giver_uid)
+        await s.commit()
+
+    async with db.session() as s:
+        recv_total = (
+            await s.execute(
+                select(_uv_func.coalesce(_uv_func.sum(db.ExpEvent.amount), 0)).where(
+                    db.ExpEvent.guild_id == guild_id,
+                    db.ExpEvent.user_id == recv_uid,
+                    db.ExpEvent.type == "upvote_received",
+                )
+            )
+        ).scalar_one()
+        given_total = (
+            await s.execute(
+                select(_uv_func.coalesce(_uv_func.sum(db.ExpEvent.amount), 0)).where(
+                    db.ExpEvent.guild_id == guild_id,
+                    db.ExpEvent.user_id == giver_uid,
+                    db.ExpEvent.type == "upvote_given",
+                )
+            )
+        ).scalar_one()
+    assert recv_total == leveling.EXP_UPVOTE_RECEIVED_DAILY_CAP, recv_total
+    assert given_total == leveling.EXP_UPVOTE_GIVEN_DAILY_CAP, given_total
+    assert leveling.EXP_PER_UPVOTE_RECEIVED > leveling.EXP_PER_UPVOTE_GIVEN
+    print(
+        f"upvote exp OK: received capped at {recv_total} "
+        f"(+{leveling.EXP_PER_UPVOTE_RECEIVED}/upvote), given capped at {given_total} "
+        f"(+{leveling.EXP_PER_UPVOTE_GIVEN}/upvote)"
+    )
+
     # --- PokeBox, Party & Pokeballs ---
     from datetime import UTC
     from datetime import date as _date
@@ -724,8 +783,10 @@ async def main() -> None:
     assert f"+{leveling.EXP_SUBMIT} EXP" in exp_text, exp_text
     assert f"+{leveling.EXP_PER_STREAK_DAY} EXP" in exp_text, exp_text
     assert f"capped at +{leveling.EXP_STREAK_CAP}" in exp_text, exp_text
-    assert f"+{leveling.EXP_PER_UPVOTE} EXP" in exp_text, exp_text
-    assert f"capped at +{leveling.EXP_UPVOTE_DAILY_CAP}/day" in exp_text, exp_text
+    assert f"+{leveling.EXP_PER_UPVOTE_RECEIVED} EXP" in exp_text, exp_text
+    assert f"capped at +{leveling.EXP_UPVOTE_RECEIVED_DAILY_CAP}/day" in exp_text, exp_text
+    assert f"+{leveling.EXP_PER_UPVOTE_GIVEN} EXP" in exp_text, exp_text
+    assert f"capped at +{leveling.EXP_UPVOTE_GIVEN_DAILY_CAP}/day" in exp_text, exp_text
     print("help EXP explainer OK: matches live leveling constants")
 
     # Issue 6: /help-admin's content mentions the two new grace/catch-window settings.
