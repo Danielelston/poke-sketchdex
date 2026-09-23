@@ -28,8 +28,10 @@ def _exp_field_value() -> str:
         f"• **Keep your streak going:** +{leveling.EXP_PER_STREAK_DAY} EXP per consecutive day, "
         f"capped at +{leveling.EXP_STREAK_CAP} — submitting to the daily **and** a wild encounter "
         "the same day still only counts once toward your streak\n"
-        f"• **Get upvoted (👍 on your sketch):** +{leveling.EXP_PER_UPVOTE} EXP per upvote, "
-        f"capped at +{leveling.EXP_UPVOTE_DAILY_CAP}/day\n\n"
+        f"• **Get upvoted (👍 on your sketch):** +{leveling.EXP_PER_UPVOTE_RECEIVED} EXP per upvote, "
+        f"capped at +{leveling.EXP_UPVOTE_RECEIVED_DAILY_CAP}/day\n"
+        f"• **Give an upvote (👍 someone else's sketch):** +{leveling.EXP_PER_UPVOTE_GIVEN} EXP per upvote, "
+        f"capped at +{leveling.EXP_UPVOTE_GIVEN_DAILY_CAP}/day\n\n"
         "EXP counts both **per-server** and **globally** (your global total is the sum "
         "across every server you sketch in) — see `/profile`."
     )

@@ -363,26 +363,43 @@ class Submissions(commands.Cog):
             ).scalar_one_or_none()
             if added and existing is None:
                 s.add(db.Upvote(submission_id=sub.id, voter_id=payload.user_id))
-                await self._maybe_award_upvote_exp(s, sub)
+                await self._maybe_award_upvote_received_exp(s, sub)
+                await self._maybe_award_upvote_given_exp(s, sub.guild_id, payload.user_id)
             elif not added and existing is not None:
                 await s.delete(existing)
             await s.commit()
 
     @staticmethod
-    async def _maybe_award_upvote_exp(s, sub: db.Submission) -> None:
-        """Award +1 EXP per upvote to the artist, capped per day."""
+    async def _maybe_award_upvote_received_exp(s, sub: db.Submission) -> None:
+        """Award EXP to the artist for receiving an upvote, capped per day."""
         today_total = (
             await s.execute(
                 select(func.coalesce(func.sum(db.ExpEvent.amount), 0)).where(
                     db.ExpEvent.guild_id == sub.guild_id,
                     db.ExpEvent.user_id == sub.user_id,
-                    db.ExpEvent.type == "upvote",
+                    db.ExpEvent.type == "upvote_received",
                     func.date(db.ExpEvent.created_at) == func.date(func.now()),
                 )
             )
         ).scalar_one()
-        if today_total < leveling.EXP_UPVOTE_DAILY_CAP:
-            await _award_exp(s, sub.guild_id, sub.user_id, "upvote", leveling.EXP_PER_UPVOTE)
+        if today_total < leveling.EXP_UPVOTE_RECEIVED_DAILY_CAP:
+            await _award_exp(s, sub.guild_id, sub.user_id, "upvote_received", leveling.EXP_PER_UPVOTE_RECEIVED)
+
+    @staticmethod
+    async def _maybe_award_upvote_given_exp(s, guild_id: int, voter_id: int) -> None:
+        """Award EXP to the voter for giving an upvote, capped per day."""
+        today_total = (
+            await s.execute(
+                select(func.coalesce(func.sum(db.ExpEvent.amount), 0)).where(
+                    db.ExpEvent.guild_id == guild_id,
+                    db.ExpEvent.user_id == voter_id,
+                    db.ExpEvent.type == "upvote_given",
+                    func.date(db.ExpEvent.created_at) == func.date(func.now()),
+                )
+            )
+        ).scalar_one()
+        if today_total < leveling.EXP_UPVOTE_GIVEN_DAILY_CAP:
+            await _award_exp(s, guild_id, voter_id, "upvote_given", leveling.EXP_PER_UPVOTE_GIVEN)
 
 
 async def setup(bot: commands.Bot) -> None:

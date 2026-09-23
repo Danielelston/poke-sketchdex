@@ -11,8 +11,13 @@ EXP_SUBMIT = 10
 EXP_WILD_ENCOUNTER = 5
 EXP_PER_STREAK_DAY = 2
 EXP_STREAK_CAP = 20  # max bonus from the streak term
-EXP_PER_UPVOTE = 1
-EXP_UPVOTE_DAILY_CAP = 25
+# Receiving an upvote on your sketch: the bigger of the two upvote-EXP amounts.
+EXP_PER_UPVOTE_RECEIVED = 2
+EXP_UPVOTE_RECEIVED_DAILY_CAP = 20
+# Giving an upvote to someone else's sketch: a tiny amount, encourages engaging
+# with others' work rather than just self-submitting. Smaller than receiving.
+EXP_PER_UPVOTE_GIVEN = 1
+EXP_UPVOTE_GIVEN_DAILY_CAP = 10
 EXP_DAILY_WINNER = 25
 EXP_THEME_CHALLENGE = 50
 EXP_SHINY_BONUS = 15
