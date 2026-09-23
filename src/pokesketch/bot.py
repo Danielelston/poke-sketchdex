@@ -12,9 +12,9 @@ from apscheduler.triggers.cron import CronTrigger
 from discord.ext import commands
 from sqlalchemy import select
 
-from . import db, pokebox
+from . import db, pokebox, weeklyvote
 from .config import Config
-from .daily import post_daily_for_guild
+from .daily import post_daily_for_guild, post_wild_encounter_for_guild
 from .pokeapi import PokeApiClient
 
 log = logging.getLogger(__name__)
@@ -82,6 +82,7 @@ class PokeSketchDexBot(commands.Bot):
             cfgs = (await s.execute(select(db.GuildConfig))).scalars().all()
         for cfg in cfgs:
             self.reschedule_guild(cfg.guild_id, cfg.post_time, cfg.timezone)
+            self.reschedule_guild_votes(cfg.guild_id, cfg.vote_day1_weekday, cfg.post_time, cfg.timezone)
 
     def reschedule_guild(self, guild_id: int, post_time: str, tz: str) -> None:
         """(Re)register the daily cron job for a guild."""
@@ -116,6 +117,75 @@ class PokeSketchDexBot(commands.Bot):
             await post_daily_for_guild(self, self.api, guild_id, local_date)
         except Exception:  # noqa: BLE001 - never let a job kill the scheduler
             log.exception("Daily job failed for guild %s", guild_id)
+        try:
+            await post_wild_encounter_for_guild(self, self.api, guild_id, local_date)
+        except Exception:  # noqa: BLE001 - never let a job kill the scheduler
+            log.exception("Wild encounter job failed for guild %s", guild_id)
+
+    def reschedule_guild_votes(self, guild_id: int, weekday: int, post_time: str, tz: str) -> None:
+        """(Re)register the day-1/day-2/resolution weekly-vote cron jobs for a
+        guild. Day 2 always fires the day after day 1, and resolution the day
+        after that — at the same time-of-day as the guild's daily post."""
+        job_ids = (f"vote-day1-{guild_id}", f"vote-day2-{guild_id}", f"vote-resolve-{guild_id}")
+        for job_id in job_ids:
+            existing = self.scheduler.get_job(job_id)
+            if existing:
+                existing.remove()
+        try:
+            hour, minute = (int(x) for x in post_time.split(":"))
+            tzinfo = ZoneInfo(tz)
+        except (ValueError, KeyError):
+            log.warning("Guild %s: bad time/tz (%s / %s); skipping vote schedule.", guild_id, post_time, tz)
+            return
+        if not 0 <= weekday <= 6:
+            log.warning("Guild %s: bad vote_day1_weekday %s; skipping vote schedule.", guild_id, weekday)
+            return
+        day1_id, day2_id, resolve_id = job_ids
+        day2_weekday = (weekday + 1) % 7
+        resolve_weekday = (weekday + 2) % 7
+        self.scheduler.add_job(
+            self._run_vote_day1_job,
+            CronTrigger(day_of_week=weekday, hour=hour, minute=minute, timezone=tzinfo),
+            id=day1_id, args=[guild_id], replace_existing=True, misfire_grace_time=3600,
+        )
+        self.scheduler.add_job(
+            self._run_vote_day2_job,
+            CronTrigger(day_of_week=day2_weekday, hour=hour, minute=minute, timezone=tzinfo),
+            id=day2_id, args=[guild_id], replace_existing=True, misfire_grace_time=3600,
+        )
+        self.scheduler.add_job(
+            self._run_vote_resolve_job,
+            CronTrigger(day_of_week=resolve_weekday, hour=hour, minute=minute, timezone=tzinfo),
+            id=resolve_id, args=[guild_id], replace_existing=True, misfire_grace_time=3600,
+        )
+        log.info(
+            "Scheduled guild %s vote cycle: day1=%s day2=%s resolve=%s at %s %s",
+            guild_id, weekday, day2_weekday, resolve_weekday, post_time, tz,
+        )
+
+    def unschedule_guild_votes(self, guild_id: int) -> None:
+        for job_id in (f"vote-day1-{guild_id}", f"vote-day2-{guild_id}", f"vote-resolve-{guild_id}"):
+            job = self.scheduler.get_job(job_id)
+            if job:
+                job.remove()
+
+    async def _run_vote_day1_job(self, guild_id: int) -> None:
+        try:
+            await weeklyvote.post_category_poll(self, guild_id)
+        except Exception:  # noqa: BLE001 - never let a job kill the scheduler
+            log.exception("Vote day-1 job failed for guild %s", guild_id)
+
+    async def _run_vote_day2_job(self, guild_id: int) -> None:
+        try:
+            await weeklyvote.resolve_category_poll(self, self.api, guild_id)
+        except Exception:  # noqa: BLE001 - never let a job kill the scheduler
+            log.exception("Vote day-2 job failed for guild %s", guild_id)
+
+    async def _run_vote_resolve_job(self, guild_id: int) -> None:
+        try:
+            await weeklyvote.resolve_choice_poll(self, self.api, guild_id)
+        except Exception:  # noqa: BLE001 - never let a job kill the scheduler
+            log.exception("Vote resolve job failed for guild %s", guild_id)
 
     def _schedule_weekly_pokeball_grant(self) -> None:
         """Global (not per-guild) weekly pokeball grant — runs once regardless of guild count."""

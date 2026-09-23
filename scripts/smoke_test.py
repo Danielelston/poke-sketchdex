@@ -344,7 +344,7 @@ async def main() -> None:
     # Issue 3 (latent double-catch bug fix): once caught, a submission drops out of
     # eligibility, and re-targeting it explicitly is rejected with a clean CatchError.
     async with db.session() as s:
-        caught_mon = await pokebox.catch_submission(s, window_uid, party_dir, target_submission_id=inside_id)
+        caught_mon = await pokebox.catch_submission(s, window_uid, party_dir, target=f"s{inside_id}")
         await s.commit()
     assert caught_mon.source_submission_id == inside_id
 
@@ -355,7 +355,7 @@ async def main() -> None:
 
     try:
         async with db.session() as s:
-            await pokebox.catch_submission(s, window_uid, party_dir, target_submission_id=inside_id)
+            await pokebox.catch_submission(s, window_uid, party_dir, target=f"s{inside_id}")
             await s.commit()
         raise AssertionError("expected CatchError for a stale/already-caught target")
     except pokebox.CatchError as exc:
@@ -393,7 +393,7 @@ async def main() -> None:
 
     async with db.session() as s:
         targeted_mon = await pokebox.catch_submission(
-            s, precedence_uid, party_dir, target_submission_id=older_id
+            s, precedence_uid, party_dir, target=f"s{older_id}"
         )
         await s.commit()
     assert targeted_mon.source_submission_id == older_id
@@ -447,6 +447,261 @@ async def main() -> None:
     assert _collection_display_name(nick_mon) == "Sparky (#0025 Pikachu)", _collection_display_name(nick_mon)
     assert _collection_display_name(caught_mons[0]) == "#0007 Squirtle", _collection_display_name(caught_mons[0])
     print("display name OK: nickname shown as 'Sparky (#0025 Pikachu)', unset stays plain species")
+
+    # --- Weekly Two-Stage Vote & Wild Encounters ---
+
+    from pokesketch import weeklyvote
+    from pokesketch.cogs.admin import _parse_dex_numbers
+    from pokesketch.cogs.submissions import Submissions
+    from pokesketch.pokeapi import PokemonRef
+
+    # /event-create's dex-number parser: valid tokens pass through deduped,
+    # bad/out-of-range tokens raise with a user-facing message.
+    assert _parse_dex_numbers("133 134, 135  136") == [133, 134, 135, 136]
+    assert _parse_dex_numbers("1,1,2") == [1, 2]  # dedup, order preserved
+    try:
+        _parse_dex_numbers("")
+        raise AssertionError("expected ValueError for empty input")
+    except ValueError as exc:
+        assert "at least one" in str(exc), exc
+    try:
+        _parse_dex_numbers("1026")
+        raise AssertionError("expected ValueError for out-of-range dex number")
+    except ValueError as exc:
+        assert "out of range" in str(exc), exc
+    print("event dex-number parser OK: valid parsed+deduped, bad input rejected cleanly")
+
+    class _FakeSentMessage:
+        def __init__(self, msg_id: int, url: str):
+            self.id = msg_id
+            self.attachments = [type("Attachment", (), {"url": url})()]
+
+        async def add_reaction(self, emoji):
+            pass
+
+    class _FakeThread:
+        def __init__(self, thread_id: int):
+            self.id = thread_id
+            self.sent: list[tuple[tuple, dict]] = []
+
+        async def send(self, *args, **kwargs):
+            self.sent.append((args, kwargs))
+            return _FakeSentMessage(70000 + len(self.sent), f"https://example.invalid/thread{self.id}-{len(self.sent)}.png")
+
+    class _FakeChannel:
+        def __init__(self, channel_id: int, thread_id: int):
+            self.id = channel_id
+            self._thread = _FakeThread(thread_id)
+            self.created_threads: list[dict] = []
+
+        async def create_thread(self, **kwargs):
+            self.created_threads.append(kwargs)
+            return self._thread
+
+        async def send(self, *args, **kwargs):
+            return _FakeSentMessage(60000, "https://example.invalid/poll.png")
+
+    class _FakeClient:
+        def __init__(self, channels: dict[int, object]):
+            self._channels = channels
+
+        def get_channel(self, cid):
+            return self._channels.get(cid)
+
+        async def fetch_channel(self, cid):
+            return self._channels[cid]
+
+    class _FakeAttachment:
+        async def to_file(self):
+            return None
+
+    class _FakeApi:
+        async def get_pokemon(self, dex_no: int) -> PokemonRef:
+            return PokemonRef(
+                dex_no=dex_no, name=f"fakemon{dex_no}", types=["normal"],
+                official_artwork="https://example.invalid/art.png",
+                sprite="https://example.invalid/sprite.png",
+                shiny_artwork=None, shiny_sprite=None,
+            )
+
+    vote_gid = 100
+    vote_channel_id, vote_thread_id = 9001, 9002
+    today = _date.today()
+
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=vote_gid, channel_id=vote_channel_id, vote_day1_weekday=6))
+        s.add(
+            db.EventDefinition(
+                guild_id=vote_gid, name="Eeveelution Week", dex_list="133\n134\n135\n136",
+                created_by=1, is_active=True,
+            )
+        )
+        await s.commit()
+
+    # Day-1 ballot: Event only appears once the guild has an active EventDefinition.
+    async with db.session() as s:
+        ballot = await weeklyvote.build_category_ballot(s, vote_gid)
+    assert set(ballot) == set(weeklyvote.ALL_CATEGORIES), ballot
+    print("category ballot OK: all 5 categories included once an active event exists")
+
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=vote_gid + 1, vote_day1_weekday=6))
+        await s.commit()
+        no_event_ballot = await weeklyvote.build_category_ballot(s, vote_gid + 1)
+    assert weeklyvote.CATEGORY_EVENT not in no_event_ballot, no_event_ballot
+    assert len(no_event_ballot) == 4, no_event_ballot
+    print("category ballot OK: Event dropped for a guild with zero active events")
+
+    # Day-2 candidates + resolution for the two network-free categories (Event, Generation).
+    async with db.session() as s:
+        event_candidates = await weeklyvote._day2_candidates(s, None, vote_gid, weeklyvote.CATEGORY_EVENT)
+    assert event_candidates == [("Eeveelution Week", "Eeveelution Week")], event_candidates
+
+    async with db.session() as s:
+        gen_pool = await weeklyvote.resolve_dex_pool(s, None, vote_gid, weeklyvote.CATEGORY_GENERATION, "Gen 1 (Kanto)")
+    assert gen_pool == list(range(1, 152)), (gen_pool[:3], gen_pool[-3:], len(gen_pool))
+    print("day-2 candidates/resolution OK: event choices + generation dex range both correct")
+
+    # Fake category winner ("event") -> fake choice winner ("Eeveelution Week") -> resolved
+    # dex pool -> thread creation, via the real day-2-resolution finalize path (network faked).
+    async with db.session() as s:
+        wv = db.WeeklyVote(guild_id=vote_gid, iso_week=pokebox.week_key(), category="event")
+        s.add(wv)
+        await s.commit()
+        weekly_vote_id = wv.id
+
+    fake_channel = _FakeChannel(vote_channel_id, vote_thread_id)
+    fake_client = _FakeClient({vote_channel_id: fake_channel, vote_thread_id: fake_channel._thread})
+    ok = await weeklyvote._finalize_weekly_vote(
+        fake_client, None, vote_gid, weekly_vote_id, "event", "Eeveelution Week"
+    )
+    assert ok, "expected _finalize_weekly_vote to succeed"
+    async with db.session() as s:
+        wv = await s.get(db.WeeklyVote, weekly_vote_id)
+    assert wv.thread_id == vote_thread_id, wv.thread_id
+    assert wv.dex_pool_numbers == [133, 134, 135, 136], wv.dex_pool_numbers
+    assert fake_channel.created_threads, "expected create_thread to be called"
+    print("weekly vote resolution OK: event/choice -> resolved dex pool -> wild-encounter thread created")
+
+    # get_active_weekly_vote: "most recent WeeklyVote with a non-null thread_id" — a newer,
+    # still-in-progress cycle (no thread yet) must NOT shadow the still-active previous one,
+    # so wild encounters keep posting with no gap while the new week's votes are in flight.
+    async with db.session() as s:
+        s.add(db.WeeklyVote(guild_id=vote_gid, iso_week="2099-W01", category="type"))  # in-progress, no thread yet
+        await s.commit()
+        active = await weeklyvote.get_active_weekly_vote(s, vote_gid)
+    assert active.id == weekly_vote_id, (active.id, weekly_vote_id)
+    print("cutover OK: in-progress new cycle doesn't shadow the still-active previous thread")
+
+    # Daily wild-encounter post: real post_wild_encounter_for_guild, network faked.
+    from pokesketch.daily import post_wild_encounter_for_guild
+
+    posted = await post_wild_encounter_for_guild(fake_client, _FakeApi(), vote_gid, today)
+    assert posted, "expected a wild encounter to post"
+    async with db.session() as s:
+        we = (
+            await s.execute(
+                select(db.WildEncounter).where(
+                    db.WildEncounter.guild_id == vote_gid, db.WildEncounter.local_date == today
+                )
+            )
+        ).scalar_one()
+    assert we.dex_no in (133, 134, 135, 136), we.dex_no
+    we_id = we.id
+    again = await post_wild_encounter_for_guild(fake_client, _FakeApi(), vote_gid, today)
+    assert not again, "expected the same-day re-post to be a no-op (idempotent)"
+    print(f"wild encounter daily post OK: posted #{we.dex_no}, same-day re-post is idempotent")
+
+    # Wild-encounter /submit: reuses the shared EXP/streak/PokeBox path.
+    subs_cog = Submissions(bot=None)
+    wild_uid = 5010
+
+    async with db.session() as s:
+        we = await s.get(db.WildEncounter, we_id)
+        confirmation, exp_msg = await subs_cog._submit_to_wild_encounter(
+            s, we, _FakeThread(vote_thread_id), _FakeAttachment(), vote_gid, wild_uid, "<@5010>", today
+        )
+        await s.commit()
+    assert "submitted" in confirmation and "EXP" in exp_msg, (confirmation, exp_msg)
+
+    async with db.session() as s:
+        wild_sub = (
+            await s.execute(
+                select(db.WildEncounterSubmission).where(
+                    db.WildEncounterSubmission.wild_encounter_id == we_id,
+                    db.WildEncounterSubmission.user_id == wild_uid,
+                )
+            )
+        ).scalar_one()
+        wild_user = (
+            await s.execute(select(db.User).where(db.User.guild_id == vote_gid, db.User.user_id == wild_uid))
+        ).scalar_one()
+        wild_global_user = (
+            await s.execute(select(db.GlobalUser).where(db.GlobalUser.user_id == wild_uid))
+        ).scalar_one()
+        wild_scanned, _ = await pokebox.pokebox_progress(s, wild_uid)
+    first_day_bonus = leveling.streak_bonus(1)
+    assert wild_user.exp == leveling.EXP_WILD_ENCOUNTER + first_day_bonus, wild_user.exp
+    assert wild_user.personal_streak == 1, wild_user.personal_streak
+    assert wild_global_user.global_streak == 1, wild_global_user.global_streak
+    assert wild_scanned == 1, wild_scanned
+    print("wild encounter submit OK: EXP/streak/PokeBox all correct for a first-time submission")
+
+    # Streak-dedup: the SAME user submitting to the main daily thread the same day must not
+    # grant a second streak increment (globally or per-guild), even though it's a separate
+    # Submission row and grants its own EXP_SUBMIT.
+    async with db.session() as s:
+        s.add(db.DailyPokemon(guild_id=vote_gid, local_date=today, dex_no=1, name="bulbasaur"))
+        await s.commit()
+        dedup_daily = (
+            await s.execute(select(db.DailyPokemon).where(db.DailyPokemon.guild_id == vote_gid))
+        ).scalar_one()
+        confirmation2, exp_msg2 = await subs_cog._submit_to_daily(
+            s, dedup_daily, _FakeThread(vote_thread_id + 1), _FakeAttachment(), vote_gid, wild_uid, "<@5010>"
+        )
+        await s.commit()
+    assert "submitted" in confirmation2 and "EXP" in exp_msg2, (confirmation2, exp_msg2)
+
+    async with db.session() as s:
+        wild_user = (
+            await s.execute(select(db.User).where(db.User.guild_id == vote_gid, db.User.user_id == wild_uid))
+        ).scalar_one()
+        wild_global_user = (
+            await s.execute(select(db.GlobalUser).where(db.GlobalUser.user_id == wild_uid))
+        ).scalar_one()
+    assert wild_user.exp == leveling.EXP_WILD_ENCOUNTER + first_day_bonus + leveling.EXP_SUBMIT, wild_user.exp
+    assert wild_user.personal_streak == 1, wild_user.personal_streak  # still 1, not 2 — deduped
+    assert wild_global_user.global_streak == 1, wild_global_user.global_streak  # still 1 — deduped
+    print("streak-dedup OK: same-day wild-encounter + main-daily submissions grant EXP but only one streak tick")
+
+    # /catch eligibility for a wild-encounter submission, via the same catchable_submissions()
+    # mechanism used for main-daily submissions (no hardcoded "today only" check).
+    async with db.session() as s:
+        eligible = await pokebox.catchable_submissions(s, wild_uid)
+    assert len(eligible) == 2, eligible  # one daily, one wild-encounter, both eligible
+    kinds = {pokebox.encode_catch_target(sub)[0] for sub, _ in eligible}
+    assert kinds == {"s", "w"}, kinds
+    wild_target = next(
+        pokebox.encode_catch_target(sub) for sub, _ in eligible if isinstance(sub, db.WildEncounterSubmission)
+    )
+    assert pokebox.decode_catch_target(wild_target) == ("w", wild_sub.id)
+    assert pokebox.decode_catch_target("garbage") is None
+    print("catch eligibility OK: wild-encounter submission surfaces via catchable_submissions()")
+
+    async with db.session() as s:
+        wild_caught = await pokebox.catch_submission(s, wild_uid, party_dir, target=wild_target)
+        await s.commit()
+    assert wild_caught.source_wild_encounter_submission_id == wild_sub.id, (
+        wild_caught.source_wild_encounter_submission_id
+    )
+    assert wild_caught.source_submission_id is None, wild_caught.source_submission_id
+    assert wild_caught.dex_no == we.dex_no, (wild_caught.dex_no, we.dex_no)
+
+    async with db.session() as s:
+        eligible_after = await pokebox.catchable_submissions(s, wild_uid)
+    assert len(eligible_after) == 1, eligible_after  # the wild-encounter one dropped out
+    assert isinstance(eligible_after[0][0], db.Submission), type(eligible_after[0][0])
+    print("catch OK: wild-encounter submission caught via /catch, dropped from eligibility after")
 
     await db.dispose()
 

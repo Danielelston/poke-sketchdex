@@ -23,8 +23,11 @@ def _exp_field_value() -> str:
     """
     return (
         f"• **Submit a sketch:** +{leveling.EXP_SUBMIT} EXP (once per day, per daily thread)\n"
+        f"• **Submit to a wild encounter:** +{leveling.EXP_WILD_ENCOUNTER} EXP (once per day, per "
+        "wild-encounter thread)\n"
         f"• **Keep your streak going:** +{leveling.EXP_PER_STREAK_DAY} EXP per consecutive day, "
-        f"capped at +{leveling.EXP_STREAK_CAP}\n"
+        f"capped at +{leveling.EXP_STREAK_CAP} — submitting to the daily **and** a wild encounter "
+        "the same day still only counts once toward your streak\n"
         f"• **Get upvoted (👍 on your sketch):** +{leveling.EXP_PER_UPVOTE} EXP per upvote, "
         f"capped at +{leveling.EXP_UPVOTE_DAILY_CAP}/day\n\n"
         "EXP counts both **per-server** and **globally** (your global total is the sum "
@@ -43,7 +46,12 @@ def _admin_field_value() -> str:
         "`/pause` / `/resume` — pause or resume daily posts\n"
         "`/post-now` — post today's challenge immediately\n"
         "`/reset-pool` — manually clear the no-repeat pool (confirmation required)\n"
-        "\nAll require the **Manage Server** permission.\n\n"
+        "`/set-vote-day` — weekday the weekly wild-encounter category vote posts "
+        "(default Sunday; the specific-choice vote is always the next day)\n"
+        "`/event-create` — author a wild-encounter Event (explicit dex number list)\n"
+        "`/event-list` — list this server's Events\n"
+        "`/event-disable` — retire an Event without deleting it\n"
+        "\nAll require the **Manage Server** permission (`/event-list` is viewable by anyone).\n\n"
         "-# Note: raising the grace period past 7 days only affects the `/submit` cutoff — "
         "Discord's visible thread auto-archive tier still caps at 7 days, but archived threads "
         "auto-unarchive the moment `/submit` posts into them, so this is cosmetic, not a hard block."
@@ -61,7 +69,10 @@ class Help(commands.Cog):
             description=(
                 "Every day the bot posts a Pokémon reference and pings the sketcher role. "
                 "Sketch it, post your art in that day's thread with `/submit`, and react 👍 "
-                "on entries you like."
+                "on entries you like.\n\n"
+                "Each week, players also vote in two stages (category, then a specific choice) "
+                "for a wild-encounter theme — a separate, optional thread that gets a fresh random "
+                "Pokémon daily. `/submit` works there too."
             ),
             color=0x5865F2,
         )
