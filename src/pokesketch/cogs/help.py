@@ -8,6 +8,10 @@ from discord.ext import commands
 
 from .. import leveling
 
+# Discord's hard cap on a single embed field's `value` (also applies per-field
+# to `name`, and separately to `description`/footer — see Discord's docs).
+DISCORD_EMBED_FIELD_LIMIT = 1024
+
 
 def _exp_field_value() -> str:
     """Build the EXP-earning explainer from the live leveling constants.
@@ -17,7 +21,7 @@ def _exp_field_value() -> str:
 
     Maintenance: when adding/renaming/removing a slash command, or when
     tuning EXP rules in `leveling.py`, also update the command-list text
-    below (player section), `_admin_field_value()` below (admin section),
+    below (player section), `_admin_field_groups()` below (admin section),
     and this EXP explainer — both `/help` and `/help-admin` need updating
     together — see the "Maintenance rule" callout in the Obsidian Bot Plan doc.
     """
@@ -37,27 +41,56 @@ def _exp_field_value() -> str:
     )
 
 
-def _admin_field_value() -> str:
-    return (
-        "`/setup` — set the post channel, role, time, and timezone\n"
-        "`/set-mode` — random vs. no-repeat-until-exhausted selection\n"
-        "`/set-generations` — restrict the dex range\n"
-        "`/set-grace-period` — days a thread stays open for `/submit` backfill (default 7, 1-30)\n"
-        "`/set-catch-window` — hours a submission stays catchable via `/catch` (default 24, "
-        "can't exceed the grace period)\n"
-        "`/pause` / `/resume` — pause or resume daily posts\n"
-        "`/post-now` — post today's challenge immediately\n"
-        "`/reset-pool` — manually clear the no-repeat pool (confirmation required)\n"
-        "`/set-vote-day` — weekday the weekly wild-encounter category vote posts "
-        "(default Sunday; the specific-choice vote is always the next day)\n"
-        "`/event-create` — author a wild-encounter Event (explicit dex number list)\n"
-        "`/event-list` — list this server's Events\n"
-        "`/event-disable` — retire an Event without deleting it\n"
-        "\nAll require the **Manage Server** permission (`/event-list` is viewable by anyone).\n\n"
-        "-# Note: raising the grace period past 7 days only affects the `/submit` cutoff — "
-        "Discord's visible thread auto-archive tier still caps at 7 days, but archived threads "
-        "auto-unarchive the moment `/submit` posts into them, so this is cosmetic, not a hard block."
-    )
+def _add_guarded_field(embed: discord.Embed, name: str, value: str, *, inline: bool = False) -> None:
+    """`embed.add_field`, but fail loudly instead of letting Discord 400 on send.
+
+    These help-text fields keep growing as commands get added — this catches
+    an over-limit field at build time instead of surfacing as a silent
+    interaction timeout in production.
+    """
+    if len(value) > DISCORD_EMBED_FIELD_LIMIT:
+        raise ValueError(
+            f"help field {name!r} is {len(value)} chars, "
+            f"over Discord's {DISCORD_EMBED_FIELD_LIMIT}-char field limit — split it further"
+        )
+    embed.add_field(name=name, value=value, inline=inline)
+
+
+def _admin_field_groups() -> list[tuple[str, str]]:
+    """Admin command reference as (field name, field value) groups.
+
+    Each group must stay under `DISCORD_EMBED_FIELD_LIMIT` chars — split
+    further if a new command pushes a group over.
+    """
+    return [
+        (
+            "⚙️ Setup & scheduling",
+            "`/setup` — set the post channel, role, time, and timezone\n"
+            "`/set-mode` — random vs. no-repeat-until-exhausted selection\n"
+            "`/set-generations` — restrict the dex range\n"
+            "`/pause` / `/resume` — pause or resume daily posts\n"
+            "`/post-now` — post today's challenge immediately",
+        ),
+        (
+            "⏳ Grace, catch & resets",
+            "`/set-grace-period` — days a thread stays open for `/submit` backfill (default 7, 1-30)\n"
+            "`/set-catch-window` — hours a submission stays catchable via `/catch` (default 24, "
+            "can't exceed the grace period)\n"
+            "`/reset-pool` — manually clear the no-repeat pool (confirmation required)\n\n"
+            "-# Note: raising the grace period past 7 days only affects the `/submit` cutoff — "
+            "Discord's visible thread auto-archive tier still caps at 7 days, but archived threads "
+            "auto-unarchive the moment `/submit` posts into them, so this is cosmetic, not a hard block.",
+        ),
+        (
+            "🗳️ Weekly vote & events",
+            "`/set-vote-day` — weekday the weekly wild-encounter category vote posts "
+            "(default Sunday; the specific-choice vote is always the next day)\n"
+            "`/event-create` — author a wild-encounter Event (explicit dex number list)\n"
+            "`/event-list` — list this server's Events\n"
+            "`/event-disable` — retire an Event without deleting it\n\n"
+            "All require the **Manage Server** permission (`/event-list` is viewable by anyone).",
+        ),
+    ]
 
 
 class Help(commands.Cog):
@@ -79,42 +112,38 @@ class Help(commands.Cog):
             ),
             color=0x5865F2,
         )
-        embed.add_field(name="⭐ How EXP works", value=_exp_field_value(), inline=False)
-        embed.add_field(
-            name="🧑‍🎨 Player commands",
-            value=(
-                "`/submit` — submit your sketch in today's thread (or an older day's thread)\n"
-                "`/profile [user]` — your (or someone's) level, EXP, and streaks\n"
-                "`/leaderboard` — top sketchers in this server by EXP\n"
-                "`/streak` / `/stats` — server-wide streak and totals\n"
-                "`/pokebox [user]` — dex completion tracker: every sketch you `/submit` scans that Pokémon in\n"
-                "`/catch [target] [nickname]` — spend a pokeball to catch an eligible sketch into "
-                "your party/storage; pick from the autocomplete list or leave blank for your most "
-                "recent one\n"
-                "-# Caught images are stored downsized (max 1080x1080px) to keep storage bounded\n"
-                "`/party [user]` — your 6 active party slots\n"
-                "`/box [user]` — paginated view of your storage box\n"
-                "`/swap <box_slot> <active_slot>` — swap a boxed mon into your active party\n"
-                "`/release <slot> [active]` — release a caught mon and free its slot\n"
-                "`/pokeballs [user]` — your pokeball balance and next weekly grant\n"
-                "`/help` — this message"
-            ),
-            inline=False,
+        _add_guarded_field(embed, "⭐ How EXP works", _exp_field_value())
+        _add_guarded_field(
+            embed,
+            "🧑‍🎨 Sketching & progress",
+            "`/submit` — submit your sketch in today's thread (or an older day's thread)\n"
+            "`/profile [user]` — your (or someone's) level, EXP, and streaks\n"
+            "`/leaderboard` — top sketchers in this server by EXP\n"
+            "`/streak` / `/stats` — server-wide streak and totals\n"
+            "`/pokebox [user]` — dex completion tracker: every sketch you `/submit` scans that Pokémon in\n"
+            "`/help` — this message",
         )
-        embed.add_field(
-            name="⏳ Submit vs. catch windows",
-            value=(
-                "Submitting and catching run on separate clocks — a thread often stays open "
-                "for `/submit` well after a sketch's own catch window has closed. Check a "
-                "thread's opening post or your `/submit` confirmation for the current windows."
-            ),
-            inline=False,
+        _add_guarded_field(
+            embed,
+            "📦 Catch & collection",
+            "`/catch [target] [nickname]` — spend a pokeball to catch an eligible sketch into "
+            "your party/storage; pick from the autocomplete list or leave blank for your most "
+            "recent one\n"
+            "-# Caught images are stored downsized (max 1080x1080px) to keep storage bounded\n"
+            "`/party [user]` — your 6 active party slots\n"
+            "`/box [user]` — paginated view of your storage box\n"
+            "`/swap <box_slot> <active_slot>` — swap a boxed mon into your active party\n"
+            "`/release <slot> [active]` — release a caught mon and free its slot\n"
+            "`/pokeballs [user]` — your pokeball balance and next weekly grant",
         )
-        embed.add_field(
-            name="🛠️ Server admin?",
-            value="See `/help-admin` for setup and moderation commands.",
-            inline=False,
+        _add_guarded_field(
+            embed,
+            "⏳ Submit vs. catch windows",
+            "Submitting and catching run on separate clocks — a thread often stays open "
+            "for `/submit` well after a sketch's own catch window has closed. Check a "
+            "thread's opening post or your `/submit` confirmation for the current windows.",
         )
+        _add_guarded_field(embed, "🛠️ Server admin?", "See `/help-admin` for setup and moderation commands.")
         embed.set_footer(text="PokeSketchDex • one Pokemon a day")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -131,7 +160,8 @@ class Help(commands.Cog):
             ),
             color=0x5865F2,
         )
-        embed.add_field(name="Admin commands", value=_admin_field_value(), inline=False)
+        for name, value in _admin_field_groups():
+            _add_guarded_field(embed, name, value)
         embed.set_footer(text="PokeSketchDex • one Pokemon a day")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
