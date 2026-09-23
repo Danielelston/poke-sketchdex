@@ -7,10 +7,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from .. import leveling
-
-# Discord's hard cap on a single embed field's `value` (also applies per-field
-# to `name`, and separately to `description`/footer — see Discord's docs).
-DISCORD_EMBED_FIELD_LIMIT = 1024
+from ..discord_limits import DISCORD_EMBED_FIELD_LIMIT  # noqa: F401 — re-exported, see scripts/smoke_test.py
+from ..discord_limits import guarded_add_field as _add_guarded_field
 
 
 def _exp_field_value() -> str:
@@ -39,21 +37,6 @@ def _exp_field_value() -> str:
         "EXP counts both **per-server** and **globally** (your global total is the sum "
         "across every server you sketch in) — see `/profile`."
     )
-
-
-def _add_guarded_field(embed: discord.Embed, name: str, value: str, *, inline: bool = False) -> None:
-    """`embed.add_field`, but fail loudly instead of letting Discord 400 on send.
-
-    These help-text fields keep growing as commands get added — this catches
-    an over-limit field at build time instead of surfacing as a silent
-    interaction timeout in production.
-    """
-    if len(value) > DISCORD_EMBED_FIELD_LIMIT:
-        raise ValueError(
-            f"help field {name!r} is {len(value)} chars, "
-            f"over Discord's {DISCORD_EMBED_FIELD_LIMIT}-char field limit — split it further"
-        )
-    embed.add_field(name=name, value=value, inline=inline)
 
 
 def _admin_field_groups() -> list[tuple[str, str]]:
@@ -85,10 +68,13 @@ def _admin_field_groups() -> list[tuple[str, str]]:
             "🗳️ Weekly vote & events",
             "`/set-vote-day` — weekday the weekly wild-encounter category vote posts "
             "(default Sunday; the specific-choice vote is always the next day)\n"
-            "`/event-create` — author a wild-encounter Event (explicit dex number list)\n"
-            "`/event-list` — list this server's Events\n"
-            "`/event-disable` — retire an Event without deleting it\n\n"
-            "All require the **Manage Server** permission (`/event-list` is viewable by anyone).",
+            "`/event-create` — author a wild-encounter Event (explicit dex number list, optional flavor text)\n"
+            "`/event-list` — paginated list of this server's Events\n"
+            "`/event-view` — inspect one Event's status, Pokemon list, and flavor text\n"
+            "`/event-edit` — rename an Event or replace its dex list / flavor text\n"
+            "`/event-disable` / `/event-enable` — retire or restore an Event without deleting it\n\n"
+            "All require the **Manage Server** permission (`/event-list` and `/event-view` are "
+            "viewable by anyone).",
         ),
     ]
 

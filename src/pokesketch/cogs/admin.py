@@ -14,8 +14,9 @@ from sqlalchemy import select
 
 from .. import db
 from ..daily import post_daily_for_guild
+from ..discord_limits import DISCORD_EMBED_FIELD_VALUE_LIMIT, guarded_add_field
 from ..selection import clear_used_pool
-from ..ui import ConfirmView
+from ..ui import ConfirmView, PaginatorView
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +28,12 @@ GRACE_PERIOD_MAX_DAYS = 30
 
 MIN_DEX_NO = 1
 MAX_DEX_NO = 1025
+
+MAX_EVENTS_PER_GUILD = 50
+EVENT_NAME_MAX_LEN = 80
+EVENT_FLAVOR_TEXT_MAX_LEN = 300
+EVENT_MAX_DEX_NUMBERS = 200
+EVENT_LIST_PAGE_SIZE = 15
 
 WEEKDAY_CHOICES = [
     app_commands.Choice(name="Monday", value=0),
@@ -55,7 +62,29 @@ def _parse_dex_numbers(raw: str) -> list[int]:
             raise ValueError(f"`{tok}` is out of range (must be {MIN_DEX_NO}-{MAX_DEX_NO}).")
         if n not in seen:
             seen.append(n)
+    if len(seen) > EVENT_MAX_DEX_NUMBERS:
+        raise ValueError(
+            f"That's {len(seen)} distinct dex numbers — events are capped at {EVENT_MAX_DEX_NUMBERS}."
+        )
     return seen
+
+
+def _render_dex_numbers(dex_numbers: list[int]) -> str:
+    """Render dex numbers as a comma-separated string, safely truncated to fit
+    under Discord's embed field value limit, e.g. "#1, #2, … (+198 more)"."""
+    tokens = [f"#{n}" for n in dex_numbers]
+    full = ", ".join(tokens)
+    if len(full) <= DISCORD_EMBED_FIELD_VALUE_LIMIT:
+        return full
+    kept = len(tokens)
+    while kept > 0:
+        kept -= 1
+        truncated = ", ".join(tokens[:kept])
+        suffix = f"… (+{len(tokens) - kept} more)"
+        candidate = f"{truncated}, {suffix}" if truncated else suffix
+        if len(candidate) <= DISCORD_EMBED_FIELD_VALUE_LIMIT:
+            return candidate
+    return f"… (+{len(tokens)} more)"
 
 
 def _validate_grace_period(days: int) -> bool:
@@ -335,19 +364,59 @@ class Admin(commands.Cog):
     @app_commands.describe(
         name="Event name, e.g. 'Eeveelution Week'",
         dex_numbers="Space or comma-separated dex numbers, e.g. '133 134 135 136 196 197 470 471'",
+        flavor_text="Optional short note on why this event exists, e.g. "
+        "'Spooky-themed pool for the Halloween season'",
     )
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def event_create(self, interaction: discord.Interaction, name: str, dex_numbers: str) -> None:
+    async def event_create(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        dex_numbers: str,
+        flavor_text: str | None = None,
+    ) -> None:
+        if len(name) > EVENT_NAME_MAX_LEN:
+            await interaction.response.send_message(
+                f"❌ Event name is {len(name)} chars — keep it under {EVENT_NAME_MAX_LEN}.",
+                ephemeral=True,
+            )
+            return
+        if flavor_text is not None and len(flavor_text) > EVENT_FLAVOR_TEXT_MAX_LEN:
+            await interaction.response.send_message(
+                f"❌ Flavor text is {len(flavor_text)} chars — keep it under {EVENT_FLAVOR_TEXT_MAX_LEN}.",
+                ephemeral=True,
+            )
+            return
         try:
             dex_list = _parse_dex_numbers(dex_numbers)
         except ValueError as exc:
             await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
             return
         async with db.session() as s:
+            existing = (
+                await s.execute(
+                    select(db.EventDefinition).where(db.EventDefinition.guild_id == interaction.guild_id)
+                )
+            ).scalars().all()
+            if len(existing) >= MAX_EVENTS_PER_GUILD:
+                await interaction.response.send_message(
+                    f"❌ This server already has {len(existing)}/{MAX_EVENTS_PER_GUILD} events — that's "
+                    "the cap. Disable an unused one with `/event-disable` to free up room.",
+                    ephemeral=True,
+                )
+                return
+            if any(e.name.lower() == name.lower() for e in existing):
+                await interaction.response.send_message(
+                    f"❌ An event named **{name}** already exists (active or disabled) — "
+                    "pick a different name.",
+                    ephemeral=True,
+                )
+                return
             s.add(
                 db.EventDefinition(
                     guild_id=interaction.guild_id,
                     name=name,
+                    flavor_text=flavor_text,
                     dex_list="\n".join(str(n) for n in dex_list),
                     created_by=interaction.user.id,
                 )
@@ -378,10 +447,21 @@ class Admin(commands.Cog):
             f"{'🟢' if e.is_active else '⚪'} **{e.name}** — {len(e.dex_numbers)} Pokemon"
             for e in events
         ]
-        embed = discord.Embed(
-            title="🎉 Wild-Encounter Events", description="\n".join(lines), color=0x5865F2
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        chunks = [lines[i : i + EVENT_LIST_PAGE_SIZE] for i in range(0, len(lines), EVENT_LIST_PAGE_SIZE)]
+        pages = []
+        for page_no, chunk in enumerate(chunks, start=1):
+            embed = discord.Embed(
+                title="🎉 Wild-Encounter Events", description="\n".join(chunk), color=0x5865F2
+            )
+            embed.set_footer(text=f"Page {page_no}/{len(chunks)} • {len(events)} events total")
+            pages.append(embed)
+
+        if len(pages) == 1:
+            await interaction.response.send_message(embed=pages[0], ephemeral=True)
+            return
+        view = PaginatorView(pages, author_id=interaction.user.id)
+        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
+        view.message = await interaction.original_response()
 
     async def _active_event_name_autocomplete(
         self, interaction: discord.Interaction, current: str
@@ -398,6 +478,66 @@ class Admin(commands.Cog):
         return [
             app_commands.Choice(name=n, value=n) for n in events if cur in n.lower()
         ][:25]
+
+    async def _disabled_event_name_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        async with db.session() as s:
+            events = (
+                await s.execute(
+                    select(db.EventDefinition.name).where(
+                        db.EventDefinition.guild_id == interaction.guild_id,
+                        db.EventDefinition.is_active.is_(False),
+                    )
+                )
+            ).scalars().all()
+        cur = current.lower()
+        return [
+            app_commands.Choice(name=n, value=n) for n in events if cur in n.lower()
+        ][:25]
+
+    async def _all_event_name_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        async with db.session() as s:
+            events = (
+                await s.execute(
+                    select(db.EventDefinition.name).where(
+                        db.EventDefinition.guild_id == interaction.guild_id
+                    )
+                )
+            ).scalars().all()
+        cur = current.lower()
+        return [
+            app_commands.Choice(name=n, value=n) for n in events if cur in n.lower()
+        ][:25]
+
+    @app_commands.command(name="event-view", description="View a wild-encounter Event's status and contents.")
+    @app_commands.describe(name="Event name to view")
+    @app_commands.autocomplete(name=_all_event_name_autocomplete)
+    async def event_view(self, interaction: discord.Interaction, name: str) -> None:
+        async with db.session() as s:
+            event = (
+                await s.execute(
+                    select(db.EventDefinition).where(
+                        db.EventDefinition.guild_id == interaction.guild_id,
+                        db.EventDefinition.name == name,
+                    )
+                )
+            ).scalars().first()
+        if event is None:
+            await interaction.response.send_message(f"No event named **{name}**.", ephemeral=True)
+            return
+        embed = discord.Embed(title=event.name, color=0x5865F2)
+        guarded_add_field(embed, "Status", "🟢 Active" if event.is_active else "⚪ Disabled", inline=True)
+        guarded_add_field(embed, "Pokemon count", f"{len(event.dex_numbers)} Pokemon", inline=True)
+        guarded_add_field(
+            embed,
+            "Flavor text",
+            event.flavor_text or "_No flavor text set — add one with `/event-edit`._",
+        )
+        guarded_add_field(embed, "Dex numbers", _render_dex_numbers(event.dex_numbers))
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="event-disable", description="Disable a wild-encounter Event without deleting it.")
     @app_commands.describe(name="Event name to disable")
@@ -422,6 +562,126 @@ class Admin(commands.Cog):
             event.is_active = False
             await s.commit()
         await interaction.response.send_message(f"✅ Disabled event **{name}**.", ephemeral=True)
+
+    @app_commands.command(name="event-enable", description="Re-enable a disabled wild-encounter Event.")
+    @app_commands.describe(name="Disabled event name to re-enable")
+    @app_commands.autocomplete(name=_disabled_event_name_autocomplete)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def event_enable(self, interaction: discord.Interaction, name: str) -> None:
+        async with db.session() as s:
+            event = (
+                await s.execute(
+                    select(db.EventDefinition).where(
+                        db.EventDefinition.guild_id == interaction.guild_id,
+                        db.EventDefinition.name == name,
+                        db.EventDefinition.is_active.is_(False),
+                    )
+                )
+            ).scalar_one_or_none()
+            if event is None:
+                await interaction.response.send_message(
+                    f"No disabled event named **{name}**.", ephemeral=True
+                )
+                return
+            event.is_active = True
+            await s.commit()
+        await interaction.response.send_message(f"✅ Re-enabled event **{name}**.", ephemeral=True)
+
+    @app_commands.command(name="event-edit", description="Edit an existing wild-encounter Event.")
+    @app_commands.describe(
+        name="Event to edit",
+        new_name="New name for the event",
+        dex_numbers="Replace the dex number list (space/comma-separated)",
+        flavor_text="Replace the flavor text",
+    )
+    @app_commands.autocomplete(name=_all_event_name_autocomplete)
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def event_edit(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        new_name: str | None = None,
+        dex_numbers: str | None = None,
+        flavor_text: str | None = None,
+    ) -> None:
+        if new_name is None and dex_numbers is None and flavor_text is None:
+            await interaction.response.send_message(
+                "❌ Provide at least one of `new_name`, `dex_numbers`, or `flavor_text` to change.",
+                ephemeral=True,
+            )
+            return
+        if new_name is not None and len(new_name) > EVENT_NAME_MAX_LEN:
+            await interaction.response.send_message(
+                f"❌ Event name is {len(new_name)} chars — keep it under {EVENT_NAME_MAX_LEN}.",
+                ephemeral=True,
+            )
+            return
+        if flavor_text is not None and len(flavor_text) > EVENT_FLAVOR_TEXT_MAX_LEN:
+            await interaction.response.send_message(
+                f"❌ Flavor text is {len(flavor_text)} chars — keep it under {EVENT_FLAVOR_TEXT_MAX_LEN}.",
+                ephemeral=True,
+            )
+            return
+        new_dex_list: list[int] | None = None
+        if dex_numbers is not None:
+            try:
+                new_dex_list = _parse_dex_numbers(dex_numbers)
+            except ValueError as exc:
+                await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+                return
+
+        async with db.session() as s:
+            event = (
+                await s.execute(
+                    select(db.EventDefinition).where(
+                        db.EventDefinition.guild_id == interaction.guild_id,
+                        db.EventDefinition.name == name,
+                    )
+                )
+            ).scalars().first()
+            if event is None:
+                await interaction.response.send_message(f"❌ No event named **{name}**.", ephemeral=True)
+                return
+
+            if new_name is not None and new_name.lower() != event.name.lower():
+                others = (
+                    await s.execute(
+                        select(db.EventDefinition).where(
+                            db.EventDefinition.guild_id == interaction.guild_id,
+                            db.EventDefinition.id != event.id,
+                        )
+                    )
+                ).scalars().all()
+                if any(e.name.lower() == new_name.lower() for e in others):
+                    await interaction.response.send_message(
+                        f"❌ An event named **{new_name}** already exists (active or disabled) — "
+                        "pick a different name.",
+                        ephemeral=True,
+                    )
+                    return
+
+            old_name = event.name
+            changes = []
+            if new_name is not None and new_name != event.name:
+                event.name = new_name
+                changes.append(f"renamed to **{new_name}**")
+            if new_dex_list is not None:
+                event.dex_list = "\n".join(str(n) for n in new_dex_list)
+                changes.append(f"dex list now {len(new_dex_list)} Pokemon")
+            if flavor_text is not None:
+                event.flavor_text = flavor_text
+                changes.append("flavor text updated")
+            await s.commit()
+
+        if not changes:
+            await interaction.response.send_message(
+                f"Nothing changed for **{old_name}** — provided values matched the current settings.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"✅ Updated **{old_name}**: {', '.join(changes)}.", ephemeral=True
+        )
 
 
 async def setup(bot: commands.Bot) -> None:
