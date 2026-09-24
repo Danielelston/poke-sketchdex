@@ -5,10 +5,14 @@ scoped, already shipped) — see that model's own docstring for why these must
 never share a table.
 
 Also owns fetching + caching the ball item art from the public PokeAPI/sprites
-GitHub repo, and pre-rendering the two per-tier card assets (a small opaque
-corner emblem + a full-bleed alpha-faded background) — the one piece of
-pre-rendering locked in by the design doc. Everything else about a profile
-card (text, party thumbnails) is rendered fresh per call by `cards.py`.
+GitHub repo, and pre-rendering the one per-tier card asset the native-embed
+rebuild still needs: a small opaque corner emblem, used as the merged
+`/profile` embed's `author.icon_url` (see cogs/profile.py). The flat-PNG
+card's full-bleed alpha-faded background watermark (a Pillow-compositing-only
+concept with no equivalent in a native `discord.Embed`, which has no
+arbitrary background layer) was dropped when the profile command was rebuilt
+as a native embed + buttons — see the design doc's "Visual direction update"
+section for why.
 """
 
 from __future__ import annotations
@@ -26,14 +30,6 @@ SPRITES_BASE = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites
 USER_AGENT = "PokeSketchDex-Bot/0.1 (+https://github.com/Danielelston/poke-sketchdex)"
 
 CORNER_EMBLEM_SIZE = 64
-FULL_BLEED_OPACITY = 0.18
-# How far the full-bleed art is upscaled past "just barely covers the canvas" —
-# a purely aesthetic choice so the ball art bleeds off all four edges rather
-# than exactly touching them.
-FULL_BLEED_OVERSCAN = 1.4
-# Flat silhouette fill color for the full-bleed watermark (see _render_tier_assets
-# for why this isn't the raw sprite's own colors).
-FULL_BLEED_SILHOUETTE_COLOR = (255, 255, 255)
 
 # (level threshold, display name, PokeAPI/sprites item slug, accent RGB), ascending.
 #
@@ -48,10 +44,8 @@ FULL_BLEED_SILHOUETTE_COLOR = (255, 255, 255)
 # as rare as it does in the games.
 #
 # Accent color is each ball's real dominant color (not derived from the tiny
-# sprite pixels, which are too small/noisy to sample reliably) — used by
-# cards.py to tint the programmatically-drawn section panels per tier, so
-# the card still feels tier-branded even though the panels themselves are
-# generic shapes, not pre-rendered art.
+# sprite pixels, which are too small/noisy to sample reliably) — used as the
+# merged /profile embed's `color` strip so the embed still feels tier-branded.
 RANK_TIERS: list[tuple[int, str, str, tuple[int, int, int]]] = [
     (1, "Poké Ball", "poke-ball", (224, 60, 55)),
     (5, "Great Ball", "great-ball", (52, 120, 199)),
@@ -75,9 +69,8 @@ def rank_for_level(level: int) -> str:
 
 
 def accent_color_for_tier(tier_name: str) -> tuple[int, int, int]:
-    """Each tier's real ball color, for tinting cards.py's programmatically-
-    drawn section panels (header/stats/party) so the card reads as
-    tier-branded without needing pre-rendered per-tier panel art."""
+    """Each tier's real ball color, used as the merged /profile embed's
+    `color` strip so the embed reads as tier-branded."""
     for _threshold, name, _slug, accent in RANK_TIERS:
         if name == tier_name:
             return accent
@@ -114,26 +107,18 @@ async def fetch_ball_sprite(tier_name: str, cache_dir: str) -> str:
     return path
 
 
-def _render_tier_assets(
-    raw_path: str, canvas_size: tuple[int, int], corner_path: str, full_bleed_path: str
-) -> None:
-    """Composite both static tier assets from the raw ball PNG. Synchronous —
-    run via asyncio.to_thread by the caller, same posture as pokebox.py's
-    _normalize_and_save (Pillow calls block, so keep them off the event loop).
+def _render_corner_emblem(raw_path: str, corner_path: str) -> None:
+    """Composite the small opaque corner-emblem PNG from the raw ball sprite.
 
-    The corner emblem uses the sprite's own painted colors (crisp enough at
-    64px). The full-bleed background does NOT — PokeAPI/sprites' item art is
-    only ~30x30px, so blowing that raw detail up ~30x for a 900px canvas (even
-    at low opacity) just reads as a soft colored blur, not a recognizable ball
-    shape (confirmed by manual visual review of sample renders before merge).
-    Instead, the full-bleed layer uses the sprite's ALPHA MASK ONLY as a flat
-    white silhouette — the mask's edges upscale cleanly via LANCZOS (shape,
-    not fine color detail, survives the scale-up), giving a watermark that
-    actually reads as a Poké Ball outline at low opacity.
+    Synchronous — run via asyncio.to_thread by the caller, same posture as
+    pokebox.py's _normalize_and_save (Pillow calls block, so keep them off
+    the event loop). Uses the sprite's own painted colors (crisp enough at
+    64px) — unlike the retired full-bleed watermark, this crop never gets
+    blown up large enough for the raw sprite's ~30x30px source detail to
+    matter.
     """
     with Image.open(raw_path) as raw:
         raw = raw.convert("RGBA")
-
         corner = Image.new("RGBA", (CORNER_EMBLEM_SIZE, CORNER_EMBLEM_SIZE), (0, 0, 0, 0))
         thumb = raw.copy()
         thumb.thumbnail((CORNER_EMBLEM_SIZE, CORNER_EMBLEM_SIZE), Image.Resampling.LANCZOS)
@@ -141,35 +126,19 @@ def _render_tier_assets(
         corner.alpha_composite(thumb, offset)
         corner.save(corner_path, format="PNG")
 
-        canvas_w, canvas_h = canvas_size
-        bg = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
-        scale = max(canvas_w / raw.width, canvas_h / raw.height) * FULL_BLEED_OVERSCAN
-        target_size = (max(1, int(raw.width * scale)), max(1, int(raw.height * scale)))
-        # Upscale the ALPHA MASK (shape), not the raw RGBA (fine color detail),
-        # then flat-fill it — this is what keeps the watermark legible at 30x.
-        alpha_mask = raw.split()[3].resize(target_size, Image.Resampling.LANCZOS)
-        silhouette = Image.new("RGBA", target_size, (*FULL_BLEED_SILHOUETTE_COLOR, 0))
-        faded_alpha = alpha_mask.point(lambda a: int(a * FULL_BLEED_OPACITY))
-        silhouette.putalpha(faded_alpha)
-        offset = ((canvas_w - silhouette.width) // 2, (canvas_h - silhouette.height) // 2)
-        bg.alpha_composite(silhouette, offset)
-        bg.save(full_bleed_path, format="PNG")
 
-
-async def get_tier_assets(tier_name: str, canvas_size: tuple[int, int], cache_dir: str) -> tuple[str, str]:
-    """Return (corner_emblem_path, full_bleed_path) for a tier, compositing +
-    caching both to disk once per (tier, canvas size) — lazily, on first use.
-
-    This is the one piece of pre-rendering the design doc locks in; nothing
-    user-specific is cached here.
+async def get_tier_emblem(tier_name: str, cache_dir: str) -> str:
+    """Return the corner-emblem PNG path for a tier, compositing + caching it
+    to disk once per tier — lazily, on first use. The one piece of
+    pre-rendering the design doc still locks in for the native-embed rebuild
+    (see module docstring for why the full-bleed background variant is gone).
     """
     slug = _slug_for_tier(tier_name)
     os.makedirs(cache_dir, exist_ok=True)
     corner_path = os.path.join(cache_dir, f"{slug}_corner.png")
-    full_bleed_path = os.path.join(cache_dir, f"{slug}_bg_{canvas_size[0]}x{canvas_size[1]}.png")
 
-    if not os.path.exists(corner_path) or not os.path.exists(full_bleed_path):
+    if not os.path.exists(corner_path):
         raw_path = await fetch_ball_sprite(tier_name, cache_dir)
-        await asyncio.to_thread(_render_tier_assets, raw_path, canvas_size, corner_path, full_bleed_path)
+        await asyncio.to_thread(_render_corner_emblem, raw_path, corner_path)
 
-    return corner_path, full_bleed_path
+    return corner_path

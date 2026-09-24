@@ -177,6 +177,29 @@ class Upvote(Base):
     submission: Mapped[Submission] = relationship(back_populates="upvotes")
 
 
+class Kudos(Base):
+    """A single kudos given to a user by a voter, one-per-voter-per-target.
+
+    Global (not guild-scoped), same posture as CaughtMon/PokeballWallet —
+    kudos is a cross-server reputation signal on the merged /profile command,
+    not a per-server stat. Mirrors Upvote's shape/uniqueness pattern (unique
+    constraint on the (target, voter) pair) rather than allowing unlimited
+    repeat kudos from the same voter, which would just measure who has the
+    most enthusiastic single friend rather than how many distinct people
+    recognize a player.
+    """
+
+    __tablename__ = "kudos"
+    __table_args__ = (
+        UniqueConstraint("target_user_id", "voter_id", name="uq_kudos_target_voter"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    target_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    voter_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class ExpEvent(Base):
     """Append-only audit log of EXP grants, so the formula can be re-tuned."""
 

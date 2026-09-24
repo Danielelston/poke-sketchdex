@@ -113,9 +113,8 @@ class Help(commands.Cog):
             embed,
             "🧑‍🎨 Sketching & progress",
             "`/submit` — submit your sketch in today's thread (or an older day's thread)\n"
-            "`/profile [user]` — your (or someone's) level, EXP, and streaks\n"
-            "`/profile-card [user]` — a shareable image card with your level, Poké Ball "
-            "rank badge, stats, and active party\n"
+            "`/profile [user]` — your (or someone's) level, Poké Ball rank, stats, active "
+            "party, and kudos — with buttons to inspect the party or give kudos\n"
             "`/leaderboard` — top sketchers in this server by EXP\n"
             "`/streak` / `/stats` — server-wide streak and totals\n"
             "`/pokebox [user]` — dex completion tracker: every sketch you `/submit` scans that Pokémon in\n"

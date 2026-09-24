@@ -1871,11 +1871,13 @@ async def main() -> None:
     assert len(empty_channel.sent) == 0, empty_channel.sent
     print("daily spotlight OK: no-submissions day posts nothing and does not crash")
 
-    # --- Player Profile Card & Poké Ball Rank Badges --------------------
-    from pokesketch import cards, rank_badges
+    # --- Player Profile Card & Poké Ball Rank Badges (native-embed rebuild +
+    # command merge) --------------------------------------------------------
+    from pokesketch import rank_badges
 
     # rank_for_level: exact threshold levels map to the correct tier, and
     # off-by-one below/above each threshold lands on the adjacent tier.
+    # Unchanged by the embed rebuild — reused, not duplicated.
     assert rank_badges.rank_for_level(1) == "Poké Ball"
     assert rank_badges.rank_for_level(4) == "Poké Ball"
     assert rank_badges.rank_for_level(5) == "Great Ball"
@@ -1891,10 +1893,11 @@ async def main() -> None:
     assert rank_badges.rank_for_level(0) == "Poké Ball"  # defensive: below the first threshold
     print("rank_for_level OK: every tier boundary maps correctly, off-by-one on both sides holds")
 
-    # get_tier_assets: full pre-render pipeline (fetch -> composite -> cache),
-    # network faked so this stays offline, same pattern as pokebox._cache_image
-    # above. Confirms both output files exist, are sized/opacity as expected,
-    # and a second call is a pure cache hit (no re-fetch).
+    # get_tier_emblem: the ONE piece of pre-rendering the native-embed rebuild
+    # keeps (the full-bleed watermark variant is gone — no equivalent in a
+    # discord.Embed). Network faked so this stays offline, same pattern as
+    # pokebox._cache_image above. Confirms the corner emblem exists at the
+    # expected size and a second call is a pure cache hit (no re-fetch).
     from PIL import Image as _BadgeImage
 
     fake_raw_dir = os.path.join(tmp, "fake_raw_ball")
@@ -1911,95 +1914,22 @@ async def main() -> None:
     rank_badges.fetch_ball_sprite = _fake_fetch_ball_sprite
 
     badge_cache_dir = os.path.join(tmp, "badge_cache")
-    canvas_size = (300, 200)
-    corner_path, full_bleed_path = await rank_badges.get_tier_assets("Great Ball", canvas_size, badge_cache_dir)
-    assert os.path.exists(corner_path) and os.path.exists(full_bleed_path)
-    with _BadgeImage.open(corner_path) as corner_img:
-        assert corner_img.size == (rank_badges.CORNER_EMBLEM_SIZE, rank_badges.CORNER_EMBLEM_SIZE), corner_img.size
-    with _BadgeImage.open(full_bleed_path) as bg_img:
-        assert bg_img.size == canvas_size, bg_img.size
-        # Center pixel should carry the faded ball color at ~15% alpha (still
-        # on a transparent canvas, so alpha reflects the fade directly).
-        center_alpha = bg_img.getpixel((canvas_size[0] // 2, canvas_size[1] // 2))[3]
-        expected_alpha = int(255 * rank_badges.FULL_BLEED_OPACITY)
-        assert abs(center_alpha - expected_alpha) <= 2, (center_alpha, expected_alpha)
+    emblem_path = await rank_badges.get_tier_emblem("Great Ball", badge_cache_dir)
+    assert os.path.exists(emblem_path)
+    with _BadgeImage.open(emblem_path) as emblem_img:
+        assert emblem_img.size == (rank_badges.CORNER_EMBLEM_SIZE, rank_badges.CORNER_EMBLEM_SIZE), emblem_img.size
     assert fetch_calls == ["Great Ball"], fetch_calls
 
-    corner_path2, full_bleed_path2 = await rank_badges.get_tier_assets("Great Ball", canvas_size, badge_cache_dir)
-    assert (corner_path2, full_bleed_path2) == (corner_path, full_bleed_path)
+    emblem_path2 = await rank_badges.get_tier_emblem("Great Ball", badge_cache_dir)
+    assert emblem_path2 == emblem_path
     assert fetch_calls == ["Great Ball"], fetch_calls  # cache hit: no second fetch
-    print(
-        "get_tier_assets OK: corner/full-bleed assets rendered at expected size/opacity, "
-        "cache hit skips re-fetch"
-    )
-
-    # render_profile_card: valid, non-empty PNG bytes across the range the
-    # design doc calls out — empty party, full 6-mon party, a max-length
-    # username, lowest tier, and a high (highest-tier) level.
-    party_sprite_dir = os.path.join(tmp, "fake_party_sprites")
-    os.makedirs(party_sprite_dir, exist_ok=True)
-    fake_sprite_paths = []
-    for i in range(6):
-        p = os.path.join(party_sprite_dir, f"mon{i}.png")
-        _BadgeImage.new("RGBA", (100 + i * 20, 80), (0, 200, 0, 255)).save(p, format="PNG")
-        fake_sprite_paths.append(p)
-
-    def _assert_valid_png(png_bytes: bytes) -> tuple[int, int]:
-        assert isinstance(png_bytes, bytes) and len(png_bytes) > 0
-        with _BadgeImage.open(io.BytesIO(png_bytes)) as img:
-            img.verify()
-        with _BadgeImage.open(io.BytesIO(png_bytes)) as img:
-            return img.size
-
-    empty_party_png = cards.render_profile_card(
-        "NoPartyUser", 1, "Poké Ball", 0, 50, 0, 0, [], corner_path, full_bleed_path
-    )
-    size_empty = _assert_valid_png(empty_party_png)
-    assert size_empty == cards.CARD_SIZE, size_empty
-
-    full_party_png = cards.render_profile_card(
-        "FullPartyUser", 8, "Ultra Ball", 40, 100, 5, 42, fake_sprite_paths, corner_path, full_bleed_path
-    )
-    _assert_valid_png(full_party_png)
-
-    long_username = "X" * 64
-    long_name_png = cards.render_profile_card(
-        long_username, 10, "Ultra Ball", 0, 100, 3, 10, fake_sprite_paths[:3], corner_path, full_bleed_path
-    )
-    _assert_valid_png(long_name_png)
-
-    low_level_png = cards.render_profile_card(
-        "LowLevel", 1, rank_badges.rank_for_level(1), 0, 50, 0, 0, [], corner_path, full_bleed_path
-    )
-    _assert_valid_png(low_level_png)
-
-    high_level_png = cards.render_profile_card(
-        "HighLevel", 60, rank_badges.rank_for_level(60), 500, 1000, 30, 500,
-        fake_sprite_paths, corner_path, full_bleed_path,
-    )
-    _assert_valid_png(high_level_png)
-    print(
-        "render_profile_card OK: valid non-empty PNG bytes for 0/6-mon party, "
-        f"a {len(long_username)}-char username, level 1, and a high level"
-    )
-
-    # Manual timing sanity check with the real compositing code (not a hard
-    # requirement, but good practice per the design doc) — should stay well
-    # under Discord's 3s ack window.
-    import time as _time
-
-    _render_start = _time.monotonic()
-    cards.render_profile_card(
-        "TimingCheckUser", 25, rank_badges.rank_for_level(25), 40, 100, 12, 88,
-        fake_sprite_paths, corner_path, full_bleed_path,
-    )
-    _render_elapsed = _time.monotonic() - _render_start
-    assert _render_elapsed < 3.0, _render_elapsed
-    print(f"render_profile_card timing OK: {_render_elapsed * 1000:.1f}ms (well under the 3s ack window)")
+    print("get_tier_emblem OK: corner emblem rendered at the expected size, cache hit skips re-fetch")
 
     # PokeApiClient.get_sprite_image_path: cache-hit branch returns the
     # existing file without touching the network (mirrors pokebox's
-    # cache-forever tests above).
+    # cache-forever tests above). Party sprites are no longer consumed by a
+    # Pillow render, but /profile's "Inspect Party" flow still relies on this
+    # cache-forever behavior for other sprite lookups in this codebase.
     from pokesketch.pokeapi import PokeApiClient
 
     sprite_cache_root = os.path.join(tmp, "sprite_cache_root")
@@ -2013,17 +1943,598 @@ async def main() -> None:
     await api_client_for_sprites.aclose()
     print("get_sprite_image_path OK: a cached sprite is returned without a network fetch")
 
-    # /help: /profile-card is documented alongside /profile.
-    from pokesketch.cogs.help import Help as _HelpForCardCheck
+    # _title_badge: leaderboard-rank-derived title, falling back to the rank
+    # tier when not ranked highly enough for a leaderboard-based title.
+    from pokesketch.cogs.profile import _accuracy_pct, _title_badge
 
-    help_cog3 = _HelpForCardCheck(bot=None)
+    assert _title_badge(1, "Great Ball") == "Champion"
+    assert _title_badge(2, "Great Ball") == "Elite Four"
+    assert _title_badge(4, "Great Ball") == "Elite Four"
+    assert _title_badge(5, "Great Ball") == "Gym Leader"
+    assert _title_badge(10, "Great Ball") == "Gym Leader"
+    assert _title_badge(11, "Great Ball") == "Great Ball Trainer"
+    assert _title_badge(None, "Master Ball") == "Master Ball Trainer"
+    print("_title_badge OK: leaderboard-rank titles at every cut, falls back to '{tier} Trainer' otherwise")
+
+    # _accuracy_pct: the LOCKED formula (submission_count / days_since_first_submit),
+    # with the divide-by-zero guard (0 days since first submit — a same-day
+    # first submission) and the 100%-display clamp (the raw formula can
+    # exceed 100% since one calendar day can hold two submissions).
+    assert _accuracy_pct(0, None) == 0.0  # never submitted
+    assert _accuracy_pct(5, 0) == 100.0  # first-day submitter: 0 days treated as 1, 5/1 clamped to 100%
+    assert _accuracy_pct(3, 10) == 30.0
+    assert _accuracy_pct(20, 10) == 100.0  # raw formula would be 200% — clamped for display
+    print("_accuracy_pct OK: divide-by-zero guarded, normal case correct, over-100% clamped")
+
+    # --- End-to-end /profile command: build real DB state for a user with
+    # BOTH per-server AND global data, run the actual command callback, and
+    # inspect the real discord.Embed/View it produces. This is the
+    # regression guard for the /profile + /profile-card merge — the whole
+    # point of consolidating is that per-server stats from the old /profile
+    # must NOT silently disappear.
+    from pokesketch.cogs.profile import Profile, ProfileView
+
+    profile_gid = 20260924
+    profile_uid = 7001
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=profile_gid))
+        s.add(
+            db.User(
+                guild_id=profile_gid, user_id=profile_uid, exp=60, level=leveling.level_for_exp(60),
+                personal_streak=2, longest_streak=4,
+            )
+        )
+        s.add(
+            db.GlobalUser(
+                user_id=profile_uid, exp=160, level=leveling.level_for_exp(160),
+                global_streak=6, longest_global_streak=9,
+            )
+        )
+        daily_p = db.DailyPokemon(guild_id=profile_gid, local_date=_date.today(), dex_no=1, name="bulbasaur")
+        s.add(daily_p)
+        await s.flush()
+        first_sub_at = _datetime.now(UTC) - _timedelta(days=9)
+        s.add(
+            db.Submission(
+                guild_id=profile_gid, user_id=profile_uid, daily_id=daily_p.id,
+                image_url="https://example.invalid/p1.png", created_at=first_sub_at,
+            )
+        )
+        s.add(
+            db.Submission(
+                guild_id=profile_gid, user_id=profile_uid, daily_id=daily_p.id,
+                image_url="https://example.invalid/p2.png",
+            )
+        )
+        await s.commit()
+        await pokebox.record_pokebox_scan(s, profile_uid, 1, None)
+        await s.commit()
+
+    profile_party_dir = os.path.join(tmp, "profile_party_cache")
+    async with db.session() as s:
+        wallet = await pokebox.get_or_create_wallet(s, profile_uid)
+        wallet.balance = 5
+        await s.commit()
+        await pokebox.catch_submission(s, profile_uid, profile_party_dir)  # shiny=False, from daily_p
+        await s.commit()
+    async with db.session() as s:
+        # A second, shiny catch so the Shinies field and party's ★ marker both
+        # have real data to show, without depending on /catch's own shiny odds.
+        shiny_daily = db.DailyPokemon(
+            guild_id=profile_gid, local_date=_date.today() - _timedelta(days=1),
+            dex_no=25, name="pikachu", is_shiny=True,
+        )
+        s.add(shiny_daily)
+        await s.flush()
+        shiny_sub = db.Submission(
+            guild_id=profile_gid, user_id=profile_uid, daily_id=shiny_daily.id,
+            image_url="https://example.invalid/shiny.png",
+        )
+        s.add(shiny_sub)
+        await s.commit()
+        shiny_sub_id = shiny_sub.id
+
+    # A fresh session so shiny_sub's created_at round-trips through SQLite as
+    # naive before catchable_submissions() compares it against `now` — doing
+    # this catch in the SAME session that just inserted the row would leave
+    # the Python-side object holding its client-side-default AWARE datetime
+    # (expire_on_commit=False keeps it), which can't compare against a naive
+    # "now" from an already-flushed row loaded fresh in the same query.
+    async with db.session() as s:
+        await pokebox.catch_submission(s, profile_uid, profile_party_dir, target=f"s{shiny_sub_id}")
+        await s.commit()
+
+    class _FakeProfileAvatar:
+        url = "https://example.invalid/avatar.png"
+        key = "fake_avatar_hash_v1"
+
+        async def save(self, path: str) -> None:
+            # Offline stand-in for discord.Asset.save() — writes a real tiny
+            # on-disk PNG (same "real file, not a mock" posture as
+            # _FakeProfileApiClient.get_sprite_image_path below) so the
+            # render module's Image.open()/circle-mask path gets exercised.
+            from PIL import Image as _AvatarImage
+
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _AvatarImage.new("RGBA", (64, 64), (100, 120, 220, 255)).save(path, format="PNG")
+
+    class _FakeProfileUser:
+        def __init__(self, uid: int, display_name: str = "ProfileTester"):
+            self.id = uid
+            self.display_name = display_name
+            self.display_avatar = _FakeProfileAvatar()
+
+    class _FakeProfileResponse:
+        def __init__(self):
+            self.deferred = False
+            self.sent_message: dict | None = None
+            self.edited: dict | None = None
+
+        async def defer(self, thinking: bool = False) -> None:
+            self.deferred = True
+
+        async def send_message(self, *args, **kwargs):
+            self.sent_message = {"args": args, "kwargs": kwargs}
+
+        async def edit_message(self, **kwargs):
+            self.edited = kwargs
+
+    class _FakeProfileFollowup:
+        def __init__(self):
+            self.sent: dict | None = None
+
+        async def send(self, **kwargs):
+            self.sent = kwargs
+
+    class _FakeProfileMessage:
+        def __init__(self):
+            self.edited: dict | None = None
+
+        async def edit(self, **kwargs):
+            self.edited = kwargs
+
+    class _FakeProfileInteraction:
+        def __init__(self, user, guild_id: int | None):
+            self.user = user
+            self.guild_id = guild_id
+            self.response = _FakeProfileResponse()
+            self.followup = _FakeProfileFollowup()
+
+        async def original_response(self):
+            return _FakeProfileMessage()
+
+    class _FakeProfileBotConfig:
+        def __init__(self, badge_cache_dir: str, image_cache_dir: str):
+            self.badge_cache_dir = badge_cache_dir
+            self.image_cache_dir = image_cache_dir
+
+    class _FakeAccentColor:
+        def __init__(self, r: int, g: int, b: int):
+            self.r = r
+            self.g = g
+            self.b = b
+
+    class _FakeFetchedUser:
+        def __init__(self, accent_color=None):
+            self.accent_color = accent_color
+
+    class _FakeProfileApiClient:
+        """Offline stand-in for pokeapi.PokeApiClient — party sprite fetches
+        must stay offline in this test, same posture as _fake_cache_image
+        above. Returns a real tiny on-disk PNG so the render module's
+        Image.open() path gets exercised, not a mocked no-op."""
+
+        def __init__(self, sprite_path: str):
+            self.sprite_path = sprite_path
+            self.calls: list[tuple[int, bool]] = []
+
+        async def get_sprite_image_path(self, dex_no: int, shiny: bool = False):
+            self.calls.append((dex_no, shiny))
+            return self.sprite_path
+
+    class _FakeProfileBot:
+        def __init__(self, badge_cache_dir: str, accent_color=None, api=None, image_cache_dir: str | None = None):
+            self.config = _FakeProfileBotConfig(badge_cache_dir, image_cache_dir or os.path.join(tmp, "image_cache"))
+            self._accent_color = accent_color
+            self.api = api
+
+        async def fetch_user(self, user_id: int):
+            return _FakeFetchedUser(accent_color=self._accent_color)
+
+    import pokesketch.cogs.profile as _profile_cog_module
+    from pokesketch.profile_card_render import ProfileCardData as _ProfileCardData
+
+    # Spy on render_profile_panel so we can capture the *real* ProfileCardData
+    # the actual /profile command path built (per-server + global stats
+    # included), while still letting the real render run so the embed's
+    # attached image is real PNG bytes, not a mock.
+    _captured_card_data: list[_ProfileCardData] = []
+    _real_render_profile_panel = _profile_cog_module.render_profile_panel
+
+    def _spying_render_profile_panel(data):
+        _captured_card_data.append(data)
+        return _real_render_profile_panel(data)
+
+    from PIL import Image as _SpriteFixtureImage
+
+    fake_sprite_path = os.path.join(tmp, "fake_party_sprite.png")
+    _SpriteFixtureImage.new("RGBA", (4, 4), (10, 20, 30, 255)).save(fake_sprite_path, format="PNG")
+    fake_api_client = _FakeProfileApiClient(fake_sprite_path)
+
+    profile_cog = Profile(
+        bot=_FakeProfileBot(badge_cache_dir, accent_color=_FakeAccentColor(88, 101, 242), api=fake_api_client)
+    )
+    profile_user = _FakeProfileUser(profile_uid)
+    profile_interaction = _FakeProfileInteraction(profile_user, guild_id=profile_gid)
+    _profile_cog_module.render_profile_panel = _spying_render_profile_panel
+    try:
+        await profile_cog.profile.callback(profile_cog, profile_interaction, user=None)
+    finally:
+        _profile_cog_module.render_profile_panel = _real_render_profile_panel
+
+    assert profile_interaction.response.deferred, "expected /profile to defer before gathering data"
+    sent = profile_interaction.followup.sent
+    assert sent is not None, "expected /profile to send an embed via followup"
+    profile_embed = sent["embed"]
+    profile_view = sent["view"]
+    assert isinstance(profile_view, ProfileView)
+    # All the old data-carrying fields are gone — that data now lives in the
+    # rendered card image, not embed.add_field(...) calls.
+    field_names = {f.name for f in profile_embed.fields}
+    assert field_names == set(), field_names
+    assert profile_embed.image is not None, "expected the card PNG to be attached via embed.set_image"
+    assert profile_embed.image.url == "attachment://profile_card.png", profile_embed.image.url
+    _assert_embed_within_discord_limits(profile_embed)
+
+    sent_files = sent["files"]
+    assert len(sent_files) == 2, f"expected [emblem_file, card_file], got {len(sent_files)}"
+    card_discord_file = next(f for f in sent_files if f.filename == "profile_card.png")
+    card_bytes = card_discord_file.fp.read()
+    assert card_bytes[:8] == b"\x89PNG\r\n\x1a\n", "expected real PNG magic bytes"
+    from PIL import Image as _ProfileCardImage
+
+    card_img = _ProfileCardImage.open(io.BytesIO(card_bytes))
+    assert card_img.width > 200 and card_img.height > 200, card_img.size
+
+    assert len(_captured_card_data) == 1, _captured_card_data
+    data = _captured_card_data[0]
+    assert data.server is not None, "expected per-server stats to reach the render pipeline"
+    assert data.server.streak == 2, data.server.streak
+    assert data.server.streak_best == 4, data.server.streak_best
+    assert data.server.sketch_count == 3, data.server.sketch_count
+    assert data.global_streak == 6, data.global_streak
+    assert data.global_sketch_count == 3, data.global_sketch_count
+    assert any("Pikachu" in p.species_name and p.is_shiny for p in data.party), data.party
+    assert data.shiny_count == 1, data.shiny_count
+    assert data.kudos_count == 0, data.kudos_count
+
+    # accent_color: bot.fetch_user() was called and its accent_color was
+    # converted to an (r, g, b) tuple and reached the render pipeline.
+    assert data.accent_color == (88, 101, 242), data.accent_color
+    # Party sprites: fetched via the fake PokeApiClient (offline, no real
+    # network call) and each non-empty slot's resolved path reached the
+    # render pipeline.
+    assert fake_api_client.calls, "expected sprite fetch calls for party members"
+    assert all(p.sprite_path == fake_sprite_path for p in data.party), data.party
+
+    # Avatar: _get_avatar_path() fetched+cached the fake avatar and the
+    # resolved local path reached the render pipeline (not just embed.thumbnail).
+    assert data.avatar_path is not None and os.path.exists(data.avatar_path), data.avatar_path
+
+    assert profile_embed.thumbnail.url == _FakeProfileAvatar.url, profile_embed.thumbnail.url
+    expected_tier = rank_badges.rank_for_level(leveling.level_for_exp(160))
+    assert profile_embed.author.name == expected_tier, profile_embed.author.name
+    assert profile_view.give_kudos.label == "Give Kudos (0)", profile_view.give_kudos.label
+    print(
+        "end-to-end /profile OK: per-server AND global stats both present in the captured ProfileCardData "
+        "(merge regression guard), old embed fields genuinely removed, real PNG card image attached, "
+        "avatar thumbnail + tier author icon set, accent_color fetched+converted, party sprites resolved"
+    )
+
+    # A user with ONLY global data (no per-guild `User` row for this guild —
+    # e.g. leveled up entirely in a different server) must still render
+    # cleanly, just without the "This Server" field — must not crash or
+    # silently require per-server data to exist.
+    global_only_uid = 7002
+    other_gid = 99999999
+    async with db.session() as s:
+        s.add(db.GlobalUser(user_id=global_only_uid, exp=10, level=1, global_streak=1, longest_global_streak=1))
+        gdaily = db.DailyPokemon(guild_id=other_gid, local_date=_date.today(), dex_no=4, name="charmander")
+        s.add(gdaily)
+        await s.flush()
+        s.add(
+            db.Submission(
+                guild_id=other_gid, user_id=global_only_uid, daily_id=gdaily.id,
+                image_url="https://example.invalid/g1.png",
+            )
+        )
+        await s.commit()
+
+    global_only_user = _FakeProfileUser(global_only_uid, display_name="GlobalOnlyUser")
+    global_only_interaction = _FakeProfileInteraction(global_only_user, guild_id=profile_gid)
+    # A separate cog/bot instance whose fetch_user() returns accent_color=None
+    # (the common case — most users never set one) so both branches of the
+    # accent-color path are exercised end-to-end, not just the present case.
+    global_only_cog = Profile(bot=_FakeProfileBot(badge_cache_dir, accent_color=None, api=fake_api_client))
+    _captured_card_data.clear()
+    _profile_cog_module.render_profile_panel = _spying_render_profile_panel
+    try:
+        await global_only_cog.profile.callback(global_only_cog, global_only_interaction, user=None)
+    finally:
+        _profile_cog_module.render_profile_panel = _real_render_profile_panel
+    global_only_embed = global_only_interaction.followup.sent["embed"]
+    assert global_only_embed.fields == [], global_only_embed.fields
+    assert len(_captured_card_data) == 1, _captured_card_data
+    global_only_data = _captured_card_data[0]
+    assert global_only_data.server is None, global_only_data.server
+    assert global_only_data.party == [], global_only_data.party
+    assert global_only_data.accent_color is None, global_only_data.accent_color
+    print(
+        "/profile OK: a user with no per-server row renders cleanly "
+        "(data.server is None reaches the render pipeline, not a crash); "
+        "fetch_user() returning accent_color=None reaches the render pipeline as None too"
+    )
+
+    # Kudos: 0 -> 1 via the real button callback, duplicate vote from the same
+    # voter rejected, self-kudos rejected — exercised through the actual
+    # ProfileView.give_kudos callback, not a query-layer unit test.
+    kudos_voter = _FakeProfileUser(8001, display_name="Voter")
+    kudos_interaction_1 = _FakeProfileInteraction(kudos_voter, guild_id=profile_gid)
+    kudos_button = profile_view.give_kudos
+    await kudos_button.callback(kudos_interaction_1)
+    assert kudos_button.label == "Give Kudos (1)", kudos_button.label
+    assert kudos_interaction_1.response.edited is not None, "expected the kudos click to edit the message"
+
+    kudos_interaction_dup = _FakeProfileInteraction(kudos_voter, guild_id=profile_gid)
+    await kudos_button.callback(kudos_interaction_dup)
+    assert kudos_button.label == "Give Kudos (1)", "duplicate vote from the same voter must not increment"
+    dup_sent = kudos_interaction_dup.response.sent_message
+    assert dup_sent is not None and "already given" in str(dup_sent).lower(), dup_sent
+
+    kudos_self_interaction = _FakeProfileInteraction(profile_user, guild_id=profile_gid)
+    await kudos_button.callback(kudos_self_interaction)
+    assert kudos_button.label == "Give Kudos (1)", "self-kudos must not increment"
+    self_sent = kudos_self_interaction.response.sent_message
+    assert self_sent is not None and "yourself" in str(self_sent).lower(), self_sent
+
+    # "Inspect Party" button: reuses pokebox.build_party_embeds (same helper
+    # /party now uses too) as an ephemeral followup — confirm it actually
+    # renders the target's party, not a redirect-to-/pokebox stub.
+    inspect_interaction = _FakeProfileInteraction(kudos_voter, guild_id=profile_gid)
+    await profile_view.inspect_party.callback(inspect_interaction)
+    inspect_sent = inspect_interaction.response.sent_message
+    assert inspect_sent is not None, "expected Inspect Party to send an ephemeral response"
+    inspect_embeds = inspect_sent["kwargs"]["embeds"]
+    assert inspect_sent["kwargs"]["ephemeral"] is True
+    assert any("Pikachu" in e.title for e in inspect_embeds), [e.title for e in inspect_embeds]
+    print("Inspect Party OK: real party data rendered via the shared pokebox.build_party_embeds helper")
+
+    async with db.session() as s:
+        kudos_rows = (
+            await s.execute(select(db.Kudos).where(db.Kudos.target_user_id == profile_uid))
+        ).scalars().all()
+    assert len(kudos_rows) == 1 and kudos_rows[0].voter_id == kudos_voter.id, kudos_rows
+    print("kudos OK: one-per-voter enforced, self-kudos rejected, button label reflects the real DB count")
+
+    # _upvotes_received_count: total upvotes across EVERY submission a user
+    # has ever made (not guild-scoped, not per-daily) — combined with
+    # _kudos_count into the profile card's single Kudos tile (D6). Seed real
+    # Submission + Upvote rows across two different submissions for the same
+    # user to confirm the join sums across all of them, not just one.
+    from pokesketch.cogs.profile import _upvotes_received_count
+
+    upvote_target_uid = 8501
+    async with db.session() as s:
+        s.add(db.GlobalUser(user_id=upvote_target_uid, exp=5, level=1))
+        upvote_daily = db.DailyPokemon(
+            guild_id=profile_gid, local_date=_date.today() - _timedelta(days=2), dex_no=7, name="squirtle"
+        )
+        s.add(upvote_daily)
+        await s.flush()
+        upvote_sub_a = db.Submission(
+            guild_id=profile_gid, user_id=upvote_target_uid, daily_id=upvote_daily.id,
+            image_url="https://example.invalid/upvote_a.png",
+        )
+        upvote_sub_b = db.Submission(
+            guild_id=profile_gid, user_id=upvote_target_uid, daily_id=upvote_daily.id,
+            image_url="https://example.invalid/upvote_b.png",
+        )
+        s.add_all([upvote_sub_a, upvote_sub_b])
+        await s.commit()
+        s.add(db.Upvote(submission_id=upvote_sub_a.id, voter_id=1))
+        s.add(db.Upvote(submission_id=upvote_sub_a.id, voter_id=2))
+        s.add(db.Upvote(submission_id=upvote_sub_b.id, voter_id=3))
+        await s.commit()
+
+    async with db.session() as s:
+        upvote_total = await _upvotes_received_count(s, upvote_target_uid)
+    assert upvote_total == 3, upvote_total
+    print("_upvotes_received_count OK: sums upvotes across every submission a user has made, not just one")
+
+    # _build_card_data: kudos_count + upvotes_received_count combine into a
+    # single ProfileCardData.kudos_count (the D6 tile shows ONE number, not
+    # two separate ones).
+    from pokesketch.cogs.profile import _build_card_data
+
+    combined_data = _build_card_data(
+        username="CombinedKudosTester", level=1, rank_tier="Poké Ball", title_badge="Poké Ball Trainer",
+        exp_into=0, exp_need=100, global_streak=0, global_streak_best=0, global_sketch_count=0,
+        accuracy_pct=0.0, dex_scanned=0, dex_total=1025, shiny_count=0, shiny_example=None,
+        kudos_count=5, upvotes_received_count=3, party=[], sprite_paths={},
+        server_level=None, server_streak=None, server_streak_best=None, server_sketch_count=None,
+        accent_color=None, avatar_path=None,
+    )
+    assert combined_data.kudos_count == 8, combined_data.kudos_count
+    print(
+        "_build_card_data OK: kudos_count (5) + upvotes_received_count (3) combine into "
+        "ProfileCardData.kudos_count (8)"
+    )
+
+    # --- Direct unit tests of profile_card_render.render_profile_panel(),
+    # not going through the cog/DB at all: confirm it never crashes on the
+    # documented edge cases and always returns valid, non-trivial PNG bytes.
+    from PIL import Image as _CardImage
+
+    from pokesketch.profile_card_render import PartyCardSlot as _PCSlot
+    from pokesketch.profile_card_render import ProfileCardData as _PCData
+    from pokesketch.profile_card_render import ServerCardStats as _PCServer
+    from pokesketch.profile_card_render import render_profile_panel as _render_panel
+
+    def _base_card_kwargs(**overrides):
+        base = dict(
+            username="CardRenderTester",
+            level=12,
+            rank_tier="Ultra Ball",
+            title_badge="Gym Leader",
+            exp_current=340,
+            exp_needed=500,
+            global_streak=4,
+            global_streak_best=9,
+            global_sketch_count=57,
+            accuracy_pct=62.5,
+            dex_scanned=118,
+            dex_total=1025,
+            shiny_count=3,
+            shiny_example="Charizard",
+            kudos_count=5,
+            party=[_PCSlot(slot=1, dex_no=25, species_name="Pikachu", is_shiny=False)],
+            server=_PCServer(level=5, streak=2, streak_best=4, sketch_count=3),
+        )
+        base.update(overrides)
+        return base
+
+    def _assert_valid_png(png_bytes: bytes, label: str) -> None:
+        assert png_bytes, f"{label}: expected non-empty PNG bytes"
+        img = _CardImage.open(io.BytesIO(png_bytes))
+        assert img.width > 0 and img.height > 0, f"{label}: degenerate image size {img.size}"
+
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=[]))), "empty party")
+
+    full_party = [
+        _PCSlot(slot=i + 1, dex_no=i * 7 + 1, species_name=f"Mon{i}", is_shiny=(i % 2 == 0)) for i in range(6)
+    ]
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=full_party))), "full 6-mon party")
+
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(server=None))), "server=None")
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(kudos_count=0))), "kudos_count=0")
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(kudos_count=9999))), "large kudos_count")
+    _assert_valid_png(
+        _render_panel(_PCData(**_base_card_kwargs(username="XxX_SuperLongTrainerNameForOverflowTesting_XxX"))),
+        "long username",
+    )
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(shiny_example=None))), "shiny_example=None")
+    print(
+        "profile_card_render OK: render_profile_panel never crashes on empty/full party, server=None, "
+        "kudos=0/9999, a long username, or shiny_example=None — all return valid non-trivial PNGs"
+    )
+
+    # --- Round-2 layout: combined Streak tile (D3), both code paths ---------
+    _assert_valid_png(
+        _render_panel(_PCData(**_base_card_kwargs(server=_PCServer(level=5, streak=2, streak_best=4, sketch_count=3)))),
+        "Streak tile with per-server data",
+    )
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(server=None))), "Streak tile with server=None")
+    print("Streak tile (D3) OK: both per-server-present and server=None paths render valid PNGs")
+
+    # --- Round-2 layout: header chip never crashes on empty/very-long text --
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(title_badge=""))), "empty title_badge chip")
+    _assert_valid_png(
+        _render_panel(
+            _PCData(**_base_card_kwargs(title_badge="X" * 200))
+        ),
+        "max-length title_badge chip",
+    )
+    print("chip rendering OK: _draw_chip/header never crashes on an empty or very long title_badge")
+
+    # --- Round-2 layout: accent-color-driven EXP gradient, both paths -------
+    from pokesketch.profile_card_render import _draw_gradient_bar as _direct_draw_gradient_bar
+    from pokesketch.profile_card_render import _gradient_from_accent
+
+    grad_light, grad_dark = _gradient_from_accent((88, 101, 242))
+    assert grad_light != grad_dark, (grad_light, grad_dark)
+    gradient_test_img = _CardImage.new("RGB", (200, 20), (0, 0, 0))
+    _direct_draw_gradient_bar(gradient_test_img, (0, 0, 200, 20), 1.0, grad_light, grad_dark)
+    _direct_draw_gradient_bar(gradient_test_img, (0, 0, 200, 20), 0.5)  # default gold->green path
+    _assert_valid_png(
+        _render_panel(_PCData(**_base_card_kwargs(accent_color=(88, 101, 242)))), "accent_color present"
+    )
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(accent_color=None))), "accent_color=None")
+    print(
+        "EXP gradient OK: _gradient_from_accent derives a distinct light/dark pair, _draw_gradient_bar "
+        "accepts overrides and the default gold->green pair, both accent-present/None render_profile_panel "
+        "paths return valid PNGs"
+    )
+
+    # --- Round-2 layout: party tiles with sprite compositing, mixed --------
+    # shiny/non-shiny/empty slots. Sprite fetch itself is stubbed offline
+    # elsewhere (fake_api_client, above) — here the render module's own
+    # Image.open()+composite path is exercised directly against a real tiny
+    # on-disk PNG fixture (reusing fake_sprite_path), not a mock.
+    mixed_party = [
+        _PCSlot(
+            slot=1, dex_no=6, species_name="Charizard", is_shiny=True, sprite_path=fake_sprite_path,
+            nickname="Blaze",
+        ),
+        _PCSlot(slot=2, dex_no=9, species_name="Blastoise", is_shiny=False, sprite_path=fake_sprite_path),
+        _PCSlot(slot=3, dex_no=3, species_name="Venusaur", is_shiny=False, sprite_path=None),
+        # Slots 4-6 omitted -> rendered as empty placeholders.
+    ]
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=mixed_party))), "mixed party with sprites")
+    # A bogus sprite path (file doesn't exist) must be skipped gracefully,
+    # not crash the whole render.
+    bogus_party = [
+        _PCSlot(slot=1, dex_no=1, species_name="Bulbasaur", is_shiny=False, sprite_path="/nonexistent/x.png")
+    ]
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=bogus_party))), "missing sprite file")
+    print(
+        "party tile sprites OK: mixed shiny/non-shiny/empty slots with real+missing sprite paths all render "
+        "valid PNGs, a failed Image.open() is skipped rather than crashing the render"
+    )
+
+    # --- Header avatar: real fixture, missing file, and None (fallback) ----
+    _assert_valid_png(
+        _render_panel(_PCData(**_base_card_kwargs(avatar_path=fake_sprite_path))), "avatar_path present"
+    )
+    _assert_valid_png(
+        _render_panel(_PCData(**_base_card_kwargs(avatar_path="/nonexistent/avatar.png"))),
+        "avatar_path missing file",
+    )
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(avatar_path=None))), "avatar_path=None")
+    print(
+        "header avatar OK: real avatar composites, a missing/bogus avatar file falls back to the "
+        "initial-letter placeholder circle instead of crashing, avatar_path=None also falls back cleanly"
+    )
+
+    # Confirm the OLD command registrations are genuinely gone, not just
+    # shadowed — /profile-card no longer exists anywhere, /profile exists
+    # exactly once (on the merged cog), not on cogs/stats.py too.
+    from pokesketch.cogs.stats import Stats as _StatsForCommandCheck
+
+    profile_cmd_names = {c.name for c in Profile(bot=None).get_app_commands()}
+    stats_cmd_names = {c.name for c in _StatsForCommandCheck(bot=None).get_app_commands()}
+    assert profile_cmd_names == {"profile"}, profile_cmd_names
+    assert "profile-card" not in profile_cmd_names, profile_cmd_names
+    assert "profile" not in stats_cmd_names, stats_cmd_names
+    assert stats_cmd_names == {"leaderboard", "streak", "stats"}, stats_cmd_names
+    print(
+        "command consolidation OK: /profile-card is gone entirely, /profile exists exactly once "
+        f"(cogs/stats.py keeps only {sorted(stats_cmd_names)})"
+    )
+
+    # /help: documents the single merged /profile command, not two.
+    from pokesketch.cogs.help import Help as _HelpForProfileCheck
+
+    help_cog3 = _HelpForProfileCheck(bot=None)
     help_interaction3 = _FakeHelpInteraction()
     await help_cog3.help_cmd.callback(help_cog3, help_interaction3)
     help_embed3 = help_interaction3.response.sent_embed
     _assert_embed_within_discord_limits(help_embed3)
     help_text3 = "\n".join(f.value for f in help_embed3.fields)
-    assert "/profile-card" in help_text3, help_text3
-    print("help OK: /profile-card documented in /help alongside /profile")
+    assert "/profile-card" not in help_text3, help_text3
+    assert help_text3.count("/profile ") + help_text3.count("/profile[") == 1 or "`/profile [user]`" in help_text3, (
+        help_text3
+    )
+    print("help OK: documents one merged /profile command, /profile-card is gone")
 
     print("ALL SMOKE TESTS PASSED")
 
