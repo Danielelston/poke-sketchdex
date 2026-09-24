@@ -624,14 +624,17 @@ def _draw_party_tile(
     name_text_y = name_row_y + (PARTY_NAME_LINE_HEIGHT - (name_bbox[3] - name_bbox[1])) // 2 - name_bbox[1]
     draw.text((text_left, name_text_y), display_name, font=name_font, fill=name_color)
 
-    # Row 2: "{species} #{dex}" — only drawn when a nickname is set (the
-    # mock always shows both lines, but with no nickname that would just
-    # duplicate row 1's already-shown species name).
+    # Row 2: always drawn now — "{species} #{dex}" when a nickname is set
+    # (row 1 already shows the nickname, so this adds the species context),
+    # or just "#{dex}" when there's no nickname (row 1 already shows the
+    # species name, so repeating it here would be redundant).
+    species_row_y = name_row_y + PARTY_NAME_LINE_HEIGHT + PARTY_TEXT_LINE_GAP
     if slot.nickname:
-        species_row_y = name_row_y + PARTY_NAME_LINE_HEIGHT + PARTY_TEXT_LINE_GAP
         species_label = f"{slot.species_name} #{slot.dex_no:04d}"
-        species_label = _truncate_to_width(species_label, dex_font, max_w)
-        draw.text((text_left, species_row_y), species_label, font=dex_font, fill=COLOR_SUBTEXT)
+    else:
+        species_label = f"#{slot.dex_no:04d}"
+    species_label = _truncate_to_width(species_label, dex_font, max_w)
+    draw.text((text_left, species_row_y), species_label, font=dex_font, fill=COLOR_SUBTEXT)
 
     # Slot number as a small corner-ribbon badge (top-right) instead of a
     # plain circle — flush with the tile's own rounded corner, concave inner
