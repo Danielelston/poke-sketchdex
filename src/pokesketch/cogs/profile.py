@@ -2,11 +2,17 @@
 
 Replaces two overlapping commands per the design doc's locked "Visual
 direction update" + "Command consolidation" decisions:
-- `/profile-card` (Pillow-composited flat PNG, PR #8) — the rendering
-  approach is fully replaced here by a native `discord.Embed` +
-  `discord.ui.View`.
+- `/profile-card` (Pillow-composited flat PNG, PR #8) — the original
+  Pillow-rendering approach was briefly dropped for a pure `discord.Embed` +
+  `discord.ui.View`, then reintroduced (see profile_card_render.py) as a
+  rendered PNG attached via `embed.set_image()` once plain embed fields
+  proved too visually flat — but the interactive `discord.ui.View` buttons
+  from that native-embed rebuild stay exactly as they are; this is a hybrid,
+  not a full revert.
 - `/profile` (cogs/stats.py's old text-embed, per-server + global stats,
-  no party/badge) — folded in below, as the "This Server" field.
+  no party/badge) — folded in below; the per-server + global stats data now
+  flows into the rendered card image (see `_build_card_data()`) rather than
+  an `embed.add_field()` "This Server" field.
 
 Command surface decision: renamed from `/profile-card` to `/profile` (the old
 `/profile-card` name is dropped entirely, not aliased) — once there is only
@@ -65,6 +71,7 @@ doesn't clutter the channel.
 
 from __future__ import annotations
 
+import io
 import logging
 
 import discord
@@ -73,20 +80,12 @@ from discord.ext import commands
 from sqlalchemy import func, select
 
 from .. import db, leveling, pokebox, rank_badges
+from ..profile_card_render import PartyCardSlot, ProfileCardData, ServerCardStats, render_profile_panel
 
 log = logging.getLogger(__name__)
 
 KUDOS_VIEW_TIMEOUT = 600.0  # 10 minutes — see module docstring's "View persistence" note.
 MAX_PARTY_LINES = 6
-
-_EXP_BAR_LEN = 12
-
-
-def _exp_bar(exp: int) -> tuple[int, int, int, str]:
-    lvl, into, need = leveling.exp_into_level(exp)
-    filled = 0 if need == 0 else int(_EXP_BAR_LEN * into / need)
-    bar = "█" * filled + "░" * (_EXP_BAR_LEN - filled)
-    return lvl, into, need, bar
 
 
 def _title_badge(leaderboard_rank: int | None, rank_tier: str) -> str:
@@ -123,20 +122,70 @@ async def _global_leaderboard_rank(s, user_id: int, user_exp: int) -> int | None
     return higher + 1
 
 
-def _party_lines(party: list[db.CaughtMon]) -> str:
-    """Compact text list for the party section — inline fields/colored tiles
-    aren't available in a real embed (see design doc caveat). Per-mon level
-    is intentionally omitted: CaughtMon.mon_level is reserved-but-unused
-    (always its default), so showing it would display a fake stat rather
-    than real data."""
-    if not party:
-        return "No active party members yet — catch one with `/catch`!"
-    lines = []
-    for mon in party[:MAX_PARTY_LINES]:
-        shiny_star = " ★" if mon.is_shiny else ""
-        name = mon.nickname or pokebox.species_display_name(mon.name)
-        lines.append(f"`{mon.slot}.` #{mon.dex_no:04d} {name}{shiny_star}")
-    return "\n".join(lines)
+def _build_card_data(
+    *,
+    username: str,
+    level: int,
+    rank_tier: str,
+    title_badge: str,
+    exp_into: int,
+    exp_need: int,
+    global_streak: int,
+    global_streak_best: int,
+    global_sketch_count: int,
+    accuracy_pct: float,
+    dex_scanned: int,
+    dex_total: int,
+    shiny_count: int,
+    shiny_example: str | None,
+    kudos_count: int,
+    party: list[db.CaughtMon],
+    server_level: int | None,
+    server_streak: int | None,
+    server_streak_best: int | None,
+    server_sketch_count: int | None,
+) -> ProfileCardData:
+    """Pure conversion from already-computed primitives (no Discord/DB
+    objects, except the CaughtMon party list which is converted here) into a
+    `profile_card_render.ProfileCardData`. This is the regression-guard seam:
+    it's what proves per-server stats still reach the rendered card now that
+    the embed no longer carries them as text fields."""
+    party_slots = [
+        PartyCardSlot(
+            slot=mon.slot,
+            dex_no=mon.dex_no,
+            display_name=mon.nickname or pokebox.species_display_name(mon.name),
+            is_shiny=mon.is_shiny,
+        )
+        for mon in party[:MAX_PARTY_LINES]
+    ]
+    server = None
+    if server_level is not None:
+        server = ServerCardStats(
+            level=server_level,
+            streak=server_streak or 0,
+            streak_best=server_streak_best or 0,
+            sketch_count=server_sketch_count or 0,
+        )
+    return ProfileCardData(
+        username=username,
+        level=level,
+        rank_tier=rank_tier,
+        title_badge=title_badge,
+        exp_current=exp_into,
+        exp_needed=exp_need,
+        global_streak=global_streak,
+        global_streak_best=global_streak_best,
+        global_sketch_count=global_sketch_count,
+        accuracy_pct=accuracy_pct,
+        dex_scanned=dex_scanned,
+        dex_total=dex_total,
+        shiny_count=shiny_count,
+        shiny_example=shiny_example,
+        kudos_count=kudos_count,
+        party=party_slots,
+        server=server,
+    )
 
 
 async def _kudos_count(s, target_user_id: int) -> int:
@@ -265,7 +314,7 @@ class Profile(commands.Cog):
             kudos_count = await _kudos_count(s, target.id)
             leaderboard_rank = await _global_leaderboard_rank(s, target.id, global_row.exp)
 
-        level, into, need, bar = _exp_bar(global_row.exp)
+        level, into, need = leveling.exp_into_level(global_row.exp)
         rank_tier = rank_badges.rank_for_level(level)
         title_badge = _title_badge(leaderboard_rank, rank_tier)
         accuracy = _accuracy_pct(global_sub_count, days_since_first)
@@ -290,52 +339,45 @@ class Profile(commands.Cog):
         if avatar is not None:
             embed.set_thumbnail(url=avatar.url)
 
-        embed.add_field(
-            name="🌐 Global",
-            value=(
-                f"Level {level} · {into}/{need} EXP\n"
-                f"`{bar}`\n"
-                f"🔥 {global_row.global_streak}-day streak (best {global_row.longest_global_streak})\n"
-                f"{global_sub_count} sketches total"
-            ),
-            inline=True,
-        )
-
+        server_level = server_streak = server_streak_best = None
         if server_row is not None:
-            slvl, sinto, sneed, sbar = _exp_bar(server_row.exp)
-            embed.add_field(
-                name="📍 This Server",
-                value=(
-                    f"Level {slvl} · {sinto}/{sneed} EXP\n"
-                    f"`{sbar}`\n"
-                    f"🔥 {server_row.personal_streak}-day streak (best {server_row.longest_streak})\n"
-                    f"{server_sub_count} sketches here"
-                ),
-                inline=True,
-            )
+            server_level, _sinto, _sneed = leveling.exp_into_level(server_row.exp)
+            server_streak = server_row.personal_streak
+            server_streak_best = server_row.longest_streak
 
-        embed.add_field(
-            name="🎯 Accuracy",
-            value=f"{accuracy:.1f}%\n({global_sub_count} sketches / {max(days_since_first or 0, 1)} days)",
-            inline=True,
+        card_data = _build_card_data(
+            username=target.display_name,
+            level=level,
+            rank_tier=rank_tier,
+            title_badge=title_badge,
+            exp_into=into,
+            exp_need=need,
+            global_streak=global_row.global_streak,
+            global_streak_best=global_row.longest_global_streak,
+            global_sketch_count=global_sub_count,
+            accuracy_pct=accuracy,
+            dex_scanned=scanned,
+            dex_total=dex_total,
+            shiny_count=shiny_count,
+            shiny_example=shiny_example,
+            kudos_count=kudos_count,
+            party=party,
+            server_level=server_level,
+            server_streak=server_streak,
+            server_streak_best=server_streak_best,
+            server_sketch_count=server_sub_count,
         )
-
-        dex_pct = (scanned / dex_total * 100) if dex_total else 0.0
-        embed.add_field(name="📖 Pokédex", value=f"{scanned}/{dex_total} ({dex_pct:.1f}%)", inline=True)
-
-        shiny_value = f"{shiny_count} species" + (f"\nLatest: {shiny_example}" if shiny_example else "")
-        embed.add_field(name="✨ Shinies", value=shiny_value, inline=True)
-
-        embed.add_field(name="⭐ Kudos", value=str(kudos_count), inline=True)
-
-        embed.add_field(name="🎒 Active Party", value=_party_lines(party), inline=False)
+        card_bytes = render_profile_panel(card_data)
+        card_filename = "profile_card.png"
+        card_file = discord.File(io.BytesIO(card_bytes), filename=card_filename)
+        embed.set_image(url=f"attachment://{card_filename}")
 
         embed.set_footer(text="PokeSketchDex")
 
         view = ProfileView(self.bot, target.id, target.display_name)
         view.give_kudos.label = f"Give Kudos ({kudos_count})"
 
-        await interaction.followup.send(embed=embed, view=view, file=emblem_file)
+        await interaction.followup.send(embed=embed, view=view, files=[emblem_file, card_file])
         view.message = await interaction.original_response()
 
 

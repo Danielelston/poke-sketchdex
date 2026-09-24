@@ -2100,10 +2100,28 @@ async def main() -> None:
         def __init__(self, badge_cache_dir: str):
             self.config = _FakeProfileBotConfig(badge_cache_dir)
 
+    import pokesketch.cogs.profile as _profile_cog_module
+    from pokesketch.profile_card_render import ProfileCardData as _ProfileCardData
+
+    # Spy on render_profile_panel so we can capture the *real* ProfileCardData
+    # the actual /profile command path built (per-server + global stats
+    # included), while still letting the real render run so the embed's
+    # attached image is real PNG bytes, not a mock.
+    _captured_card_data: list[_ProfileCardData] = []
+    _real_render_profile_panel = _profile_cog_module.render_profile_panel
+
+    def _spying_render_profile_panel(data):
+        _captured_card_data.append(data)
+        return _real_render_profile_panel(data)
+
     profile_cog = Profile(bot=_FakeProfileBot(badge_cache_dir))
     profile_user = _FakeProfileUser(profile_uid)
     profile_interaction = _FakeProfileInteraction(profile_user, guild_id=profile_gid)
-    await profile_cog.profile.callback(profile_cog, profile_interaction, user=None)
+    _profile_cog_module.render_profile_panel = _spying_render_profile_panel
+    try:
+        await profile_cog.profile.callback(profile_cog, profile_interaction, user=None)
+    finally:
+        _profile_cog_module.render_profile_panel = _real_render_profile_panel
 
     assert profile_interaction.response.deferred, "expected /profile to defer before gathering data"
     sent = profile_interaction.followup.sent
@@ -2111,33 +2129,44 @@ async def main() -> None:
     profile_embed = sent["embed"]
     profile_view = sent["view"]
     assert isinstance(profile_view, ProfileView)
+    # All the old data-carrying fields are gone — that data now lives in the
+    # rendered card image, not embed.add_field(...) calls.
     field_names = {f.name for f in profile_embed.fields}
-    assert "🌐 Global" in field_names, field_names
-    assert "📍 This Server" in field_names, field_names  # the actual regression risk of the merge
-    assert "🎯 Accuracy" in field_names, field_names
-    assert "📖 Pokédex" in field_names, field_names
-    assert "✨ Shinies" in field_names, field_names
-    assert "⭐ Kudos" in field_names, field_names
-    assert "🎒 Active Party" in field_names, field_names
+    assert field_names == set(), field_names
+    assert profile_embed.image is not None, "expected the card PNG to be attached via embed.set_image"
+    assert profile_embed.image.url == "attachment://profile_card.png", profile_embed.image.url
     _assert_embed_within_discord_limits(profile_embed)
 
-    server_field = next(f for f in profile_embed.fields if f.name == "📍 This Server")
-    assert "2-day streak" in server_field.value and "3 sketches here" in server_field.value, server_field.value
-    global_field = next(f for f in profile_embed.fields if f.name == "🌐 Global")
-    assert "6-day streak" in global_field.value and "3 sketches total" in global_field.value, global_field.value
-    party_field = next(f for f in profile_embed.fields if f.name == "🎒 Active Party")
-    assert "Pikachu" in party_field.value and "★" in party_field.value, party_field.value
-    shiny_field = next(f for f in profile_embed.fields if f.name == "✨ Shinies")
-    assert shiny_field.value.startswith("1 species"), shiny_field.value
-    kudos_field = next(f for f in profile_embed.fields if f.name == "⭐ Kudos")
-    assert kudos_field.value == "0", kudos_field.value
+    sent_files = sent["files"]
+    assert len(sent_files) == 2, f"expected [emblem_file, card_file], got {len(sent_files)}"
+    card_discord_file = next(f for f in sent_files if f.filename == "profile_card.png")
+    card_bytes = card_discord_file.fp.read()
+    assert card_bytes[:8] == b"\x89PNG\r\n\x1a\n", "expected real PNG magic bytes"
+    from PIL import Image as _ProfileCardImage
+
+    card_img = _ProfileCardImage.open(io.BytesIO(card_bytes))
+    assert card_img.width > 200 and card_img.height > 200, card_img.size
+
+    assert len(_captured_card_data) == 1, _captured_card_data
+    data = _captured_card_data[0]
+    assert data.server is not None, "expected per-server stats to reach the render pipeline"
+    assert data.server.streak == 2, data.server.streak
+    assert data.server.streak_best == 4, data.server.streak_best
+    assert data.server.sketch_count == 3, data.server.sketch_count
+    assert data.global_streak == 6, data.global_streak
+    assert data.global_sketch_count == 3, data.global_sketch_count
+    assert any("Pikachu" in p.display_name and p.is_shiny for p in data.party), data.party
+    assert data.shiny_count == 1, data.shiny_count
+    assert data.kudos_count == 0, data.kudos_count
+
     assert profile_embed.thumbnail.url == _FakeProfileAvatar.url, profile_embed.thumbnail.url
     expected_tier = rank_badges.rank_for_level(leveling.level_for_exp(160))
     assert profile_embed.author.name == expected_tier, profile_embed.author.name
     assert profile_view.give_kudos.label == "Give Kudos (0)", profile_view.give_kudos.label
     print(
-        "end-to-end /profile OK: per-server AND global stats both present (merge regression guard), "
-        "accuracy/dex/shiny/kudos/party fields all populated, avatar thumbnail + tier author icon set"
+        "end-to-end /profile OK: per-server AND global stats both present in the captured ProfileCardData "
+        "(merge regression guard), old embed fields genuinely removed, real PNG card image attached, "
+        "avatar thumbnail + tier author icon set"
     )
 
     # A user with ONLY global data (no per-guild `User` row for this guild —
@@ -2161,14 +2190,22 @@ async def main() -> None:
 
     global_only_user = _FakeProfileUser(global_only_uid, display_name="GlobalOnlyUser")
     global_only_interaction = _FakeProfileInteraction(global_only_user, guild_id=profile_gid)
-    await profile_cog.profile.callback(profile_cog, global_only_interaction, user=None)
+    _captured_card_data.clear()
+    _profile_cog_module.render_profile_panel = _spying_render_profile_panel
+    try:
+        await profile_cog.profile.callback(profile_cog, global_only_interaction, user=None)
+    finally:
+        _profile_cog_module.render_profile_panel = _real_render_profile_panel
     global_only_embed = global_only_interaction.followup.sent["embed"]
-    global_only_fields = {f.name for f in global_only_embed.fields}
-    assert "📍 This Server" not in global_only_fields, global_only_fields
-    assert "🌐 Global" in global_only_fields, global_only_fields
-    party_only_field = next(f for f in global_only_embed.fields if f.name == "🎒 Active Party")
-    assert "No active party" in party_only_field.value, party_only_field.value
-    print("/profile OK: a user with no per-server row renders cleanly (field omitted, not a crash)")
+    assert global_only_embed.fields == [], global_only_embed.fields
+    assert len(_captured_card_data) == 1, _captured_card_data
+    global_only_data = _captured_card_data[0]
+    assert global_only_data.server is None, global_only_data.server
+    assert global_only_data.party == [], global_only_data.party
+    print(
+        "/profile OK: a user with no per-server row renders cleanly "
+        "(data.server is None reaches the render pipeline, not a crash)"
+    )
 
     # Kudos: 0 -> 1 via the real button callback, duplicate vote from the same
     # voter rejected, self-kudos rejected — exercised through the actual
@@ -2210,6 +2247,64 @@ async def main() -> None:
         ).scalars().all()
     assert len(kudos_rows) == 1 and kudos_rows[0].voter_id == kudos_voter.id, kudos_rows
     print("kudos OK: one-per-voter enforced, self-kudos rejected, button label reflects the real DB count")
+
+    # --- Direct unit tests of profile_card_render.render_profile_panel(),
+    # not going through the cog/DB at all: confirm it never crashes on the
+    # documented edge cases and always returns valid, non-trivial PNG bytes.
+    from PIL import Image as _CardImage
+
+    from pokesketch.profile_card_render import PartyCardSlot as _PCSlot
+    from pokesketch.profile_card_render import ProfileCardData as _PCData
+    from pokesketch.profile_card_render import ServerCardStats as _PCServer
+    from pokesketch.profile_card_render import render_profile_panel as _render_panel
+
+    def _base_card_kwargs(**overrides):
+        base = dict(
+            username="CardRenderTester",
+            level=12,
+            rank_tier="Ultra Ball",
+            title_badge="Gym Leader",
+            exp_current=340,
+            exp_needed=500,
+            global_streak=4,
+            global_streak_best=9,
+            global_sketch_count=57,
+            accuracy_pct=62.5,
+            dex_scanned=118,
+            dex_total=1025,
+            shiny_count=3,
+            shiny_example="Charizard",
+            kudos_count=5,
+            party=[_PCSlot(slot=1, dex_no=25, display_name="Pikachu", is_shiny=False)],
+            server=_PCServer(level=5, streak=2, streak_best=4, sketch_count=3),
+        )
+        base.update(overrides)
+        return base
+
+    def _assert_valid_png(png_bytes: bytes, label: str) -> None:
+        assert png_bytes, f"{label}: expected non-empty PNG bytes"
+        img = _CardImage.open(io.BytesIO(png_bytes))
+        assert img.width > 0 and img.height > 0, f"{label}: degenerate image size {img.size}"
+
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=[]))), "empty party")
+
+    full_party = [
+        _PCSlot(slot=i + 1, dex_no=i * 7 + 1, display_name=f"Mon{i}", is_shiny=(i % 2 == 0)) for i in range(6)
+    ]
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=full_party))), "full 6-mon party")
+
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(server=None))), "server=None")
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(kudos_count=0))), "kudos_count=0")
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(kudos_count=9999))), "large kudos_count")
+    _assert_valid_png(
+        _render_panel(_PCData(**_base_card_kwargs(username="XxX_SuperLongTrainerNameForOverflowTesting_XxX"))),
+        "long username",
+    )
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(shiny_example=None))), "shiny_example=None")
+    print(
+        "profile_card_render OK: render_profile_panel never crashes on empty/full party, server=None, "
+        "kudos=0/9999, a long username, or shiny_example=None — all return valid non-trivial PNGs"
+    )
 
     # Confirm the OLD command registrations are genuinely gone, not just
     # shadowed — /profile-card no longer exists anywhere, /profile exists
