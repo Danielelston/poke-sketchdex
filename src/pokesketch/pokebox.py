@@ -16,9 +16,10 @@ import re
 from datetime import UTC, datetime, timedelta
 from math import ceil
 
+import discord
 import httpx
 from PIL import Image, ImageOps
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import selectinload
 
 from .db import CaughtMon, GlobalUser, GuildConfig, PokeballWallet, PokeBox, Submission, WildEncounterSubmission
@@ -464,6 +465,66 @@ async def box_listing(s, user_id: int) -> list[CaughtMon]:
             .order_by(CaughtMon.slot)
         )
     ).scalars().all()
+
+
+def build_party_embeds(display_name: str, mons: list[CaughtMon]) -> tuple[list[discord.Embed], list[discord.File]]:
+    """Build the (embeds, files) pair for a party display — shared by /party
+    (cogs/collection.py) and the merged /profile command's "Inspect Party"
+    button (cogs/profile.py), so both surfaces render a party the same way
+    instead of two divergent implementations of the same listing."""
+    embeds: list[discord.Embed] = []
+    files: list[discord.File] = []
+    for mon in mons:
+        embed = discord.Embed(title=f"Slot {mon.slot}: {_party_display_name(mon)}", color=0x5865F2)
+        if mon.cached_image_path and os.path.exists(mon.cached_image_path):
+            filename = f"slot{mon.slot}.png"
+            files.append(discord.File(mon.cached_image_path, filename=filename))
+            embed.set_image(url=f"attachment://{filename}")
+        embeds.append(embed)
+    if embeds:
+        embeds[0].set_author(name=f"{display_name}'s Active Party ({len(mons)}/{MAX_ACTIVE})")
+    return embeds, files
+
+
+def _party_display_name(mon: CaughtMon) -> str:
+    shiny_tag = " ✨" if mon.is_shiny else ""
+    species = f"#{mon.dex_no:04d} {species_display_name(mon.name)}{shiny_tag}"
+    if mon.nickname:
+        return f"{mon.nickname} ({species})"
+    return species
+
+
+async def shiny_summary(s, user_id: int) -> tuple[int, str | None]:
+    """Return (distinct shiny species count, most-recently-caught shiny's
+    display name or None) across a user's whole collection (active party +
+    storage box — "have you ever caught a shiny", not just their current
+    active 6)."""
+    rows = (
+        await s.execute(
+            select(CaughtMon)
+            .where(CaughtMon.user_id == user_id, CaughtMon.is_shiny)
+            .order_by(desc(CaughtMon.caught_at))
+        )
+    ).scalars().all()
+    if not rows:
+        return 0, None
+    distinct_species = len({r.dex_no for r in rows})
+    return distinct_species, species_display_name(rows[0].name)
+
+
+async def days_since_first_submission(s, user_id: int) -> int | None:
+    """Whole days elapsed since a user's first-ever Submission (any guild),
+    or None if they have never submitted. Used to compute accuracy% on the
+    merged /profile command — MIN(Submission.created_at) is the literal
+    "days since joining" source, more direct than trusting GlobalUser.created_at
+    (set once at first insert and never touched, but a step removed from the
+    actual first-submission event)."""
+    first_created_at = (
+        await s.execute(select(func.min(Submission.created_at)).where(Submission.user_id == user_id))
+    ).scalar_one_or_none()
+    if first_created_at is None:
+        return None
+    return max(0, (_naive_utcnow() - first_created_at).days)
 
 
 def week_key(dt: datetime | None = None) -> str:

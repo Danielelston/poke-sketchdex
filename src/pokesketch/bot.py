@@ -26,7 +26,7 @@ INITIAL_EXTENSIONS = [
     "pokesketch.cogs.submissions",
     "pokesketch.cogs.collection",
     "pokesketch.cogs.stats",
-    "pokesketch.cogs.profile_card",
+    "pokesketch.cogs.profile",
     "pokesketch.cogs.gym",
     "pokesketch.cogs.help",
 ]
