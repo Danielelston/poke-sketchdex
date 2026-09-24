@@ -99,7 +99,7 @@ PARTY_SECTION_HEIGHT = PARTY_LABEL_HEIGHT + PARTY_TILE_HEIGHT
 PARTY_NAME_FONT_SIZE = 14
 PARTY_DEX_FONT_SIZE = 12
 PARTY_SPRITE_SIZE = 44
-PARTY_SLOT_BADGE_SIZE = 34  # corner-ribbon badge, not a circle — see _draw_corner_ribbon_badge
+PARTY_SLOT_BADGE_SIZE = 26  # corner-ribbon badge, not a circle — see _draw_corner_ribbon_badge
 PARTY_TILE_RADIUS = 10  # must match the radius passed to _draw_panel() for party tiles
 
 CARD_HEIGHT = (
@@ -307,28 +307,26 @@ def _draw_corner_ribbon_badge(
     size: int = PARTY_SLOT_BADGE_SIZE,
     tile_radius: int = PARTY_TILE_RADIUS,
 ) -> None:
-    """Corner-ribbon slot badge: a quarter-circle tab filling the tile's
-    top-right corner, flush with the tile's own outer corner, whose inner
-    edge is a smooth curve bulging OUTWARD (convex) toward the tile's
-    center — matches a trading-card-style rank ribbon, not a plain circle
-    and not a concave "bite taken out of the corner" cut."""
+    """Corner-ribbon slot badge: CSS `border-radius: 0 <tile_radius>px 0
+    <tile_radius>px` on a small rectangle flush in the tile's top-right
+    corner — top-right corner rounded to flush-match the tile's own outer
+    corner, bottom-left corner rounded by the same radius for the ribbon's
+    inward tab curve, top-left/bottom-right corners left sharp (they sit
+    flush against the tile's own top/right edges)."""
     x0, y0, x1, y1 = box
     badge = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    mask = Image.new("L", (size, size), 0)
-    md = ImageDraw.Draw(mask)
-    # Circle anchored at the badge's own top-right corner (size, 0): the
-    # part of that circle inside the badge box is a convex quarter-circle
-    # whose curve bulges toward the bottom-left (i.e. into the tile).
-    r = size * 0.95
-    md.ellipse((size - r, -r, size + r, r), fill=255)
-    fill_layer = Image.new("RGBA", (size, size), (*bg_color, 255))
-    badge.paste(fill_layer, (0, 0), mask)
+    bd = ImageDraw.Draw(badge)
+    bd.rounded_rectangle(
+        (0, 0, size - 1, size - 1), radius=tile_radius, fill=bg_color,
+        corners=(False, True, False, True),  # (top-left, top-right, bottom-right, bottom-left)
+    )
     px, py = x1 - size, y0
     card.paste(badge, (px, py), badge)
 
-    # Center the digit in the solid (upper-right) wedge.
-    text_cx = px + size * 0.68
-    text_cy = py + size * 0.30
+    # Center the digit in the badge box (a rounded rect has much more
+    # interior room than the quarter-circle shape did).
+    text_cx = px + size * 0.5
+    text_cy = py + size * 0.5
     bbox = ImageDraw.Draw(card).textbbox((0, 0), text, font=font)
     ImageDraw.Draw(card).text(
         (text_cx - (bbox[2] - bbox[0]) / 2 - bbox[0], text_cy - (bbox[3] - bbox[1]) / 2 - bbox[1]),
