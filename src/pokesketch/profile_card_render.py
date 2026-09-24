@@ -65,6 +65,8 @@ PANEL_RADIUS = 14
 HEADER_HEIGHT = 90
 HEADER_FONT_SIZE = 30
 HEADER_SUB_FONT_SIZE = 20
+HEADER_AVATAR_SIZE = 64  # circular, right-aligned within the header panel
+HEADER_AVATAR_MARGIN = 16  # gap from the header panel's right/top edge
 
 # --- Header title-badge chip (MUI-chip-style pill) ----------------------
 CHIP_PAD_X = 11
@@ -165,6 +167,12 @@ class ProfileCardData:
     # drives the EXP bar's gradient when present; None (most users never set
     # one) falls back to the locked gold->green pair.
     accent_color: tuple[int, int, int] | None = None
+    # Local file path to a cached copy of the target's Discord avatar
+    # (fetched by the async caller — see cogs/profile.py — since this
+    # render module stays synchronous; same pattern as PartyCardSlot's
+    # sprite_path). None renders a plain initial-letter placeholder circle
+    # instead of leaving a blank gap.
+    avatar_path: str | None = None
 
 
 def _truncate_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
@@ -184,6 +192,57 @@ def _truncate_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int) 
         else:
             hi = mid - 1
     return text[:lo] + ellipsis if lo > 0 else ellipsis
+
+
+def _draw_circular_avatar(
+    card: Image.Image,
+    center_x: int,
+    center_y: int,
+    size: int,
+    avatar_path: str | None,
+    fallback_letter: str,
+    border_color: tuple[int, int, int],
+) -> None:
+    """Composite a circular avatar (Discord-style) centered at (center_x,
+    center_y). Opens+resizes+circle-masks the cached image at `avatar_path`
+    (same synchronous-open, async-pre-fetch pattern as party tile sprites —
+    see PartyCardSlot's sprite_path / _draw_party_tile). Falls back to a
+    plain filled circle with the target's first initial when no avatar was
+    fetched/available, rather than leaving a blank gap, same posture as the
+    party grid's "Empty" placeholder tiles."""
+    x0, y0 = center_x - size // 2, center_y - size // 2
+
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+
+    if avatar_path:
+        try:
+            with Image.open(avatar_path) as avatar_img:
+                avatar_img = avatar_img.convert("RGBA").resize((size, size), Image.Resampling.LANCZOS)
+                card.paste(avatar_img, (x0, y0), mask)
+        except Exception:
+            log.warning("Failed to composite avatar from %r", avatar_path, exc_info=True)
+            avatar_path = None  # fall through to the placeholder below
+
+    if not avatar_path:
+        circle = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        cd = ImageDraw.Draw(circle)
+        cd.ellipse((0, 0, size - 1, size - 1), fill=COLOR_MUTED_BORDER)
+        letter = (fallback_letter or "?")[0].upper()
+        letter_font = ImageFont.truetype(FONT_BOLD, int(size * 0.45))
+        bbox = cd.textbbox((0, 0), letter, font=letter_font)
+        cd.text(
+            (size / 2 - (bbox[2] - bbox[0]) / 2 - bbox[0], size / 2 - (bbox[3] - bbox[1]) / 2 - bbox[1]),
+            letter, font=letter_font, fill=COLOR_TEXT,
+        )
+        card.paste(circle, (x0, y0), circle)
+
+    # Thin ring so the avatar reads as a distinct element against the
+    # header panel's surface color, same border-accent language the party
+    # tiles use (gold/blurple outline).
+    ring = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    ImageDraw.Draw(ring).ellipse((1, 1, size - 2, size - 2), outline=border_color, width=2)
+    card.paste(ring, (x0, y0), ring)
 
 
 def _draw_chip(
@@ -476,9 +535,23 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
     # --- Header / identity area ------------------------------------
     header_box = (MARGIN, MARGIN, CARD_WIDTH - MARGIN, MARGIN + HEADER_HEIGHT)
     _draw_panel(draw, header_box, fill=COLOR_SURFACE, outline=COLOR_MUTED_BORDER)
+
+    # Avatar, right-aligned within the header panel — reserves horizontal
+    # room from the username/title text so the two never overlap.
+    avatar_border = (
+        _gradient_from_accent(data.accent_color)[0] if data.accent_color is not None else COLOR_BLURPLE
+    )
+    avatar_cx = CARD_WIDTH - MARGIN - HEADER_AVATAR_MARGIN - HEADER_AVATAR_SIZE // 2
+    avatar_cy = MARGIN + HEADER_AVATAR_MARGIN + HEADER_AVATAR_SIZE // 2
+    _draw_circular_avatar(
+        card, avatar_cx, avatar_cy, HEADER_AVATAR_SIZE, data.avatar_path, data.username, avatar_border
+    )
+    draw = ImageDraw.Draw(card)  # re-bind after paste() mutated the underlying image
+
     tx = MARGIN + 16
     ty = MARGIN + 14
-    username = _truncate_to_width(data.username, header_font, CARD_WIDTH - MARGIN * 2 - 32)
+    text_right_limit = avatar_cx - HEADER_AVATAR_SIZE // 2 - 16  # stop short of the avatar
+    username = _truncate_to_width(data.username, header_font, text_right_limit - tx)
     draw.text((tx, ty), username, font=header_font, fill=COLOR_TEXT)
 
     # Sub-line: "Level {N} · {title_badge}" (title_badge rendered as a
@@ -487,7 +560,7 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
     level_text = f"Level {data.level} · "
     draw.text((tx, sub_y), level_text, font=sub_font, fill=COLOR_SUBTEXT)
     chip_x = tx + int(sub_font.getlength(level_text))
-    chip_right_limit = CARD_WIDTH - MARGIN - 16
+    chip_right_limit = text_right_limit
     chip_max_text_w = max(0, (chip_right_limit - chip_x) - CHIP_PAD_X * 2)
     badge_text = _truncate_to_width(data.title_badge, sub_font, chip_max_text_w)
     _draw_chip(draw, chip_x, sub_y - CHIP_PAD_Y, badge_text, sub_font, COLOR_BLURPLE, COLOR_TEXT)

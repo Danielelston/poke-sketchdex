@@ -2046,6 +2046,17 @@ async def main() -> None:
 
     class _FakeProfileAvatar:
         url = "https://example.invalid/avatar.png"
+        key = "fake_avatar_hash_v1"
+
+        async def save(self, path: str) -> None:
+            # Offline stand-in for discord.Asset.save() — writes a real tiny
+            # on-disk PNG (same "real file, not a mock" posture as
+            # _FakeProfileApiClient.get_sprite_image_path below) so the
+            # render module's Image.open()/circle-mask path gets exercised.
+            from PIL import Image as _AvatarImage
+
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _AvatarImage.new("RGBA", (64, 64), (100, 120, 220, 255)).save(path, format="PNG")
 
     class _FakeProfileUser:
         def __init__(self, uid: int, display_name: str = "ProfileTester"):
@@ -2093,8 +2104,9 @@ async def main() -> None:
             return _FakeProfileMessage()
 
     class _FakeProfileBotConfig:
-        def __init__(self, badge_cache_dir: str):
+        def __init__(self, badge_cache_dir: str, image_cache_dir: str):
             self.badge_cache_dir = badge_cache_dir
+            self.image_cache_dir = image_cache_dir
 
     class _FakeAccentColor:
         def __init__(self, r: int, g: int, b: int):
@@ -2121,8 +2133,8 @@ async def main() -> None:
             return self.sprite_path
 
     class _FakeProfileBot:
-        def __init__(self, badge_cache_dir: str, accent_color=None, api=None):
-            self.config = _FakeProfileBotConfig(badge_cache_dir)
+        def __init__(self, badge_cache_dir: str, accent_color=None, api=None, image_cache_dir: str | None = None):
+            self.config = _FakeProfileBotConfig(badge_cache_dir, image_cache_dir or os.path.join(tmp, "image_cache"))
             self._accent_color = accent_color
             self.api = api
 
@@ -2204,6 +2216,10 @@ async def main() -> None:
     # render pipeline.
     assert fake_api_client.calls, "expected sprite fetch calls for party members"
     assert all(p.sprite_path == fake_sprite_path for p in data.party), data.party
+
+    # Avatar: _get_avatar_path() fetched+cached the fake avatar and the
+    # resolved local path reached the render pipeline (not just embed.thumbnail).
+    assert data.avatar_path is not None and os.path.exists(data.avatar_path), data.avatar_path
 
     assert profile_embed.thumbnail.url == _FakeProfileAvatar.url, profile_embed.thumbnail.url
     expected_tier = rank_badges.rank_for_level(leveling.level_for_exp(160))
@@ -2346,7 +2362,7 @@ async def main() -> None:
         accuracy_pct=0.0, dex_scanned=0, dex_total=1025, shiny_count=0, shiny_example=None,
         kudos_count=5, upvotes_received_count=3, party=[], sprite_paths={},
         server_level=None, server_streak=None, server_streak_best=None, server_sketch_count=None,
-        accent_color=None,
+        accent_color=None, avatar_path=None,
     )
     assert combined_data.kudos_count == 8, combined_data.kudos_count
     print(
@@ -2470,6 +2486,20 @@ async def main() -> None:
     print(
         "party tile sprites OK: mixed shiny/non-shiny/empty slots with real+missing sprite paths all render "
         "valid PNGs, a failed Image.open() is skipped rather than crashing the render"
+    )
+
+    # --- Header avatar: real fixture, missing file, and None (fallback) ----
+    _assert_valid_png(
+        _render_panel(_PCData(**_base_card_kwargs(avatar_path=fake_sprite_path))), "avatar_path present"
+    )
+    _assert_valid_png(
+        _render_panel(_PCData(**_base_card_kwargs(avatar_path="/nonexistent/avatar.png"))),
+        "avatar_path missing file",
+    )
+    _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(avatar_path=None))), "avatar_path=None")
+    print(
+        "header avatar OK: real avatar composites, a missing/bogus avatar file falls back to the "
+        "initial-letter placeholder circle instead of crashing, avatar_path=None also falls back cleanly"
     )
 
     # Confirm the OLD command registrations are genuinely gone, not just

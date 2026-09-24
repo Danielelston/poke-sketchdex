@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 
 import discord
 from discord import app_commands
@@ -86,6 +87,32 @@ log = logging.getLogger(__name__)
 
 KUDOS_VIEW_TIMEOUT = 600.0  # 10 minutes — see module docstring's "View persistence" note.
 MAX_PARTY_LINES = 6
+
+
+async def _get_avatar_path(bot: commands.Bot, user: discord.abc.User) -> str | None:
+    """Fetch (once) + cache-to-disk-forever the target's Discord avatar PNG,
+    for the header's circular avatar — same on-disk cache-forever posture as
+    `PokeApiClient.get_sprite_image_path()` (cache dir keyed by user id +
+    avatar hash, so a changed avatar naturally gets a new file rather than
+    serving a stale cached image). A fetch/download failure just means the
+    render falls back to the initial-letter placeholder circle, not a
+    crashed /profile — same non-fatal posture as the party sprite fetch."""
+    avatar = getattr(user, "display_avatar", None)
+    if avatar is None:
+        return None
+    cache_dir = os.path.join(bot.config.image_cache_dir, "avatars")
+    os.makedirs(cache_dir, exist_ok=True)
+    # avatar.key is stable per (user_id, avatar_hash) — a changed avatar
+    # naturally busts the cache since the key changes too.
+    path = os.path.join(cache_dir, f"{user.id}_{avatar.key}.png")
+    if os.path.exists(path):
+        return path
+    try:
+        await avatar.save(path)
+    except (discord.HTTPException, OSError):
+        log.warning("Failed to fetch/save avatar for user_id=%s", user.id, exc_info=True)
+        return None
+    return path
 
 
 def _title_badge(leaderboard_rank: int | None, rank_tier: str) -> str:
@@ -147,6 +174,7 @@ def _build_card_data(
     server_streak_best: int | None,
     server_sketch_count: int | None,
     accent_color: tuple[int, int, int] | None,
+    avatar_path: str | None,
 ) -> ProfileCardData:
     """Pure conversion from already-computed primitives (no Discord/DB
     objects, except the CaughtMon party list which is converted here) into a
@@ -195,6 +223,7 @@ def _build_card_data(
         party=party_slots,
         server=server,
         accent_color=accent_color,
+        avatar_path=avatar_path,
     )
 
 
@@ -357,6 +386,8 @@ class Profile(commands.Cog):
             c = fetched_user.accent_color
             accent_color = (c.r, c.g, c.b)
 
+        avatar_path = await _get_avatar_path(self.bot, target)
+
         # Party sprites: network I/O happens here (async), so only a resolved
         # local file path gets threaded into ProfileCardData — the Pillow
         # render itself stays synchronous. A per-mon fetch failure just
@@ -422,6 +453,7 @@ class Profile(commands.Cog):
             server_streak_best=server_streak_best,
             server_sketch_count=server_sub_count,
             accent_color=accent_color,
+            avatar_path=avatar_path,
         )
         card_bytes = render_profile_panel(card_data)
         card_filename = "profile_card.png"
