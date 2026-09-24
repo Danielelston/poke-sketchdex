@@ -139,23 +139,32 @@ def _build_card_data(
     shiny_count: int,
     shiny_example: str | None,
     kudos_count: int,
+    upvotes_received_count: int,
     party: list[db.CaughtMon],
+    sprite_paths: dict[int, str | None],
     server_level: int | None,
     server_streak: int | None,
     server_streak_best: int | None,
     server_sketch_count: int | None,
+    accent_color: tuple[int, int, int] | None,
 ) -> ProfileCardData:
     """Pure conversion from already-computed primitives (no Discord/DB
     objects, except the CaughtMon party list which is converted here) into a
     `profile_card_render.ProfileCardData`. This is the regression-guard seam:
     it's what proves per-server stats still reach the rendered card now that
-    the embed no longer carries them as text fields."""
+    the embed no longer carries them as text fields.
+
+    `sprite_paths` is keyed by `CaughtMon.slot` — the caller resolves each
+    party member's sprite via `PokeApiClient.get_sprite_image_path` (async
+    network I/O) *before* calling this, since this function and the render
+    module it feeds stay synchronous."""
     party_slots = [
         PartyCardSlot(
             slot=mon.slot,
             dex_no=mon.dex_no,
             display_name=mon.nickname or pokebox.species_display_name(mon.name),
             is_shiny=mon.is_shiny,
+            sprite_path=sprite_paths.get(mon.slot),
         )
         for mon in party[:MAX_PARTY_LINES]
     ]
@@ -182,15 +191,30 @@ def _build_card_data(
         dex_total=dex_total,
         shiny_count=shiny_count,
         shiny_example=shiny_example,
-        kudos_count=kudos_count,
+        kudos_count=kudos_count + upvotes_received_count,
         party=party_slots,
         server=server,
+        accent_color=accent_color,
     )
 
 
 async def _kudos_count(s, target_user_id: int) -> int:
     return (
         await s.execute(select(func.count()).select_from(db.Kudos).where(db.Kudos.target_user_id == target_user_id))
+    ).scalar_one()
+
+
+async def _upvotes_received_count(s, target_user_id: int) -> int:
+    """Total upvotes across every submission the user has ever made (not
+    guild-scoped, same cross-server posture as kudos) — combined with
+    `_kudos_count` into the profile card's single Kudos tile number."""
+    return (
+        await s.execute(
+            select(func.count())
+            .select_from(db.Upvote)
+            .join(db.Submission, db.Submission.id == db.Upvote.submission_id)
+            .where(db.Submission.user_id == target_user_id)
+        )
     ).scalar_one()
 
 
@@ -312,12 +336,41 @@ class Profile(commands.Cog):
             days_since_first = await pokebox.days_since_first_submission(s, target.id)
             party = await pokebox.party_listing(s, target.id)
             kudos_count = await _kudos_count(s, target.id)
+            upvotes_received_count = await _upvotes_received_count(s, target.id)
             leaderboard_rank = await _global_leaderboard_rank(s, target.id, global_row.exp)
 
         level, into, need = leveling.exp_into_level(global_row.exp)
         rank_tier = rank_badges.rank_for_level(level)
         title_badge = _title_badge(leaderboard_rank, rank_tier)
         accuracy = _accuracy_pct(global_sub_count, days_since_first)
+
+        # discord.User.accent_color is only populated on a freshly-fetched
+        # User, never on a cached Member/User — must explicitly fetch it.
+        # Most users never set one (None), and the fetch itself can fail
+        # (rate limit, deleted account) without that being fatal to /profile.
+        accent_color: tuple[int, int, int] | None = None
+        try:
+            fetched_user = await self.bot.fetch_user(target.id)
+        except (discord.NotFound, discord.HTTPException):
+            fetched_user = None
+        if fetched_user is not None and fetched_user.accent_color is not None:
+            c = fetched_user.accent_color
+            accent_color = (c.r, c.g, c.b)
+
+        # Party sprites: network I/O happens here (async), so only a resolved
+        # local file path gets threaded into ProfileCardData — the Pillow
+        # render itself stays synchronous. A per-mon fetch failure just
+        # drops that one sprite, not the whole card.
+        sprite_paths: dict[int, str | None] = {}
+        for mon in party[:MAX_PARTY_LINES]:
+            try:
+                sprite_paths[mon.slot] = await self.bot.api.get_sprite_image_path(mon.dex_no, shiny=mon.is_shiny)
+            except Exception:
+                log.warning(
+                    "Failed to fetch party sprite for dex_no=%s shiny=%s",
+                    mon.dex_no, mon.is_shiny, exc_info=True,
+                )
+                sprite_paths[mon.slot] = None
 
         emblem_path = await rank_badges.get_tier_emblem(rank_tier, self.bot.config.badge_cache_dir)
         emblem_filename = "tier_emblem.png"
@@ -361,11 +414,14 @@ class Profile(commands.Cog):
             shiny_count=shiny_count,
             shiny_example=shiny_example,
             kudos_count=kudos_count,
+            upvotes_received_count=upvotes_received_count,
             party=party,
+            sprite_paths=sprite_paths,
             server_level=server_level,
             server_streak=server_streak,
             server_streak_best=server_streak_best,
             server_sketch_count=server_sub_count,
+            accent_color=accent_color,
         )
         card_bytes = render_profile_panel(card_data)
         card_filename = "profile_card.png"

@@ -5,30 +5,41 @@ across `embed.add_field(...)` calls.
 `render_profile_panel()` is the one entry point: a pure, synchronous function
 callable/testable without a live Discord interaction or any DB access — the
 caller (cogs/profile.py's `_build_card_data()`) converts already-fetched DB
-rows into a `ProfileCardData` before calling this. No I/O beyond loading the
-system DejaVu fonts, so this is fully deterministic and unit-testable in
-isolation.
+rows into a `ProfileCardData` before calling this. No network I/O — party
+sprites are fetched by the async caller beforehand (see
+pokeapi.PokeApiClient.get_sprite_image_path) and only a resolved local file
+path is passed in; this module just opens that file synchronously via
+`Image.open()` — so this stays fully deterministic and unit-testable in
+isolation, given system DejaVu fonts and whatever sprite files already exist
+on disk.
 
 Layout intent (see assets/user_profile_card/code.html for the mockup this
 follows, and the module-level color tokens below, which are the LOCKED design
 tokens for THIS render — not the raw Discord-Activity-UI palette dump in
-assets/user_profile_card/DESIGN.md): an identity/header area, a gold-to-green
-gradient EXP bar, a 3x2 grid of stat tiles (Global / Per-Server / Accuracy /
-Pokédex / Shiny / Kudos), and a row of 6 party tiles (always 6 slots, empty
-ones rendered as placeholders) with per-mon borders (gold for shiny, blurple
-otherwise). Deliberately does NOT reproduce the mockup's full-bleed watermark
-background (see rank_badges.py's module docstring for why that was dropped)
-and does NOT render any per-mon level (`CaughtMon.mon_level` is a reserved/
-unused fake stat elsewhere in this codebase — see cogs/profile.py — and this
-render must not surface it either, even though the mockup shows "Lv. 85").
+assets/user_profile_card/DESIGN.md): an identity/header area (with a
+chip-styled title badge), a gradient EXP bar (accent-color-driven when the
+target has a Discord accent color, gold-to-green otherwise), a 3x2 grid of
+stat tiles (Global / This Server / Streak / Pokédex / Shiny / Kudos), and a
+row of 6 party tiles (always 6 slots, empty ones rendered as placeholders)
+with per-mon borders (gold for shiny, blurple otherwise) and an official-
+artwork sprite. Deliberately does NOT reproduce the mockup's full-bleed
+watermark background (see rank_badges.py's module docstring for why that was
+dropped) and does NOT render any per-mon level (`CaughtMon.mon_level` is a
+reserved/unused fake stat elsewhere in this codebase — see cogs/profile.py —
+and this render must not surface it either, even though the mockup shows
+"Lv. 85").
 """
 
 from __future__ import annotations
 
+import colorsys
 import io
+import logging
 from dataclasses import dataclass, field
 
 from PIL import Image, ImageDraw, ImageFont
+
+log = logging.getLogger(__name__)
 
 # --- Locked color tokens (exact hex from the design doc's Discord-native
 # palette, not the raw Discord-Activity-UI dump in DESIGN.md) -------------
@@ -44,7 +55,7 @@ COLOR_MUTED_BORDER = (0x3F, 0x41, 0x47)
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-CARD_WIDTH = 900
+CARD_WIDTH = 984
 MARGIN = 24
 PANEL_RADIUS = 14
 
@@ -52,6 +63,10 @@ PANEL_RADIUS = 14
 HEADER_HEIGHT = 90
 HEADER_FONT_SIZE = 30
 HEADER_SUB_FONT_SIZE = 20
+
+# --- Header title-badge chip (MUI-chip-style pill) ----------------------
+CHIP_PAD_X = 11
+CHIP_PAD_Y = 5
 
 # --- EXP bar ------------------------------------------------------------
 EXP_GAP_ABOVE = 16
@@ -77,12 +92,14 @@ PARTY_GAP_ABOVE = 20
 PARTY_LABEL_HEIGHT = 24
 PARTY_SLOTS = 6
 PARTY_TILE_GAP = 12
-PARTY_TILE_HEIGHT = 92
+PARTY_TILE_HEIGHT = 104
 PARTY_TILE_WIDTH = (CARD_WIDTH - MARGIN * 2 - PARTY_TILE_GAP * (PARTY_SLOTS - 1)) // PARTY_SLOTS
 PARTY_TILE_BORDER_WIDTH = 2
 PARTY_SECTION_HEIGHT = PARTY_LABEL_HEIGHT + PARTY_TILE_HEIGHT
-PARTY_NAME_FONT_SIZE = 13
+PARTY_NAME_FONT_SIZE = 14
 PARTY_DEX_FONT_SIZE = 12
+PARTY_SPRITE_SIZE = 44
+PARTY_SLOT_BADGE_SIZE = 18
 
 CARD_HEIGHT = (
     MARGIN
@@ -110,6 +127,11 @@ class PartyCardSlot:
     dex_no: int
     display_name: str
     is_shiny: bool
+    # Local file path to a cached official-artwork PNG (fetched by the async
+    # caller via pokeapi.PokeApiClient.get_sprite_image_path — this render
+    # module stays synchronous and just opens+composites it), or None if no
+    # sprite was fetched/available.
+    sprite_path: str | None = None
 
 
 @dataclass
@@ -131,6 +153,11 @@ class ProfileCardData:
     kudos_count: int
     party: list[PartyCardSlot] = field(default_factory=list)
     server: ServerCardStats | None = None
+    # The target's Discord profile accent color (discord.User.accent_color,
+    # only populated on a freshly-fetched User, not a cached Member/User) —
+    # drives the EXP bar's gradient when present; None (most users never set
+    # one) falls back to the locked gold->green pair.
+    accent_color: tuple[int, int, int] | None = None
 
 
 def _truncate_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
@@ -152,6 +179,47 @@ def _truncate_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int) 
     return text[:lo] + ellipsis if lo > 0 else ellipsis
 
 
+def _draw_chip(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    bg_color: tuple[int, int, int],
+    text_color: tuple[int, int, int],
+) -> int:
+    """Draw a rounded-pill "chip" (MUI-chip style): a small rounded-rect
+    background behind `text`, top-left anchored at (x, y). Returns the pixel
+    width consumed so a caller could lay out multiple chips in a row.
+    Measures via `draw.textbbox()` (not a fixed size) so it degrades safely
+    on an empty string (still draws a minimal pill) or a very long string
+    (grows to fit — callers that need a width cap truncate the text first via
+    `_truncate_to_width`, same as this file's other text-measuring call
+    sites)."""
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    chip_w = text_w + CHIP_PAD_X * 2
+    chip_h = text_h + CHIP_PAD_Y * 2
+    draw.rounded_rectangle((x, y, x + chip_w, y + chip_h), radius=chip_h // 2, fill=bg_color)
+    draw.text((x + CHIP_PAD_X - bbox[0], y + CHIP_PAD_Y - bbox[1]), text, font=font, fill=text_color)
+    return chip_w
+
+
+def _gradient_from_accent(accent: tuple[int, int, int]) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    """Derive a two-tone (lighter, darker) gradient pair from a single accent
+    color so the EXP bar keeps its "gradient bar" visual identity instead of
+    falling back to a flat single-hue fill. HSL lightness +/-15%, clamped to
+    [0, 1]."""
+    r, g, b = (c / 255.0 for c in accent)
+    hue, lightness, sat = colorsys.rgb_to_hls(r, g, b)
+    light = colorsys.hls_to_rgb(hue, min(1.0, lightness + 0.15), sat)
+    dark = colorsys.hls_to_rgb(hue, max(0.0, lightness - 0.15), sat)
+    light_rgb = tuple(round(ch * 255) for ch in light)
+    dark_rgb = tuple(round(ch * 255) for ch in dark)
+    return light_rgb, dark_rgb
+
+
 def _draw_panel(
     draw: ImageDraw.ImageDraw,
     box: tuple[int, int, int, int],
@@ -163,12 +231,20 @@ def _draw_panel(
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=outline_width)
 
 
-def _draw_gradient_bar(card: Image.Image, box: tuple[int, int, int, int], frac: float) -> None:
+def _draw_gradient_bar(
+    card: Image.Image,
+    box: tuple[int, int, int, int],
+    frac: float,
+    start_color: tuple[int, int, int] = COLOR_GOLD,
+    end_color: tuple[int, int, int] = COLOR_GREEN,
+) -> None:
     """Draw a rounded-rect EXP bar: a dim track, filled left-to-right with a
-    horizontal gold-to-green gradient, composited through a rounded-rect
-    alpha mask so a partially-filled bar still has rounded ends (built as a
-    small gradient strip rather than a plain flat fill, per the locked design
-    spec)."""
+    horizontal `start_color`-to-`end_color` gradient (the locked gold-to-
+    green pair by default; the caller passes an accent-derived two-tone pair
+    instead when the target has a Discord accent color), composited through
+    a rounded-rect alpha mask so a partially-filled bar still has rounded
+    ends (built as a small gradient strip rather than a plain flat fill, per
+    the locked design spec)."""
     x0, y0, x1, y1 = box
     w, h = x1 - x0, y1 - y0
     draw = ImageDraw.Draw(card)
@@ -183,9 +259,9 @@ def _draw_gradient_bar(card: Image.Image, box: tuple[int, int, int, int], frac: 
     grad_pixels = gradient.load()
     for gx in range(fill_w):
         t = gx / max(1, w - 1)  # gradient position relative to the FULL bar width
-        r = int(COLOR_GOLD[0] + (COLOR_GREEN[0] - COLOR_GOLD[0]) * t)
-        g = int(COLOR_GOLD[1] + (COLOR_GREEN[1] - COLOR_GOLD[1]) * t)
-        b = int(COLOR_GOLD[2] + (COLOR_GREEN[2] - COLOR_GOLD[2]) * t)
+        r = int(start_color[0] + (end_color[0] - start_color[0]) * t)
+        g = int(start_color[1] + (end_color[1] - start_color[1]) * t)
+        b = int(start_color[2] + (end_color[2] - start_color[2]) * t)
         for gy in range(h):
             grad_pixels[gx, gy] = (r, g, b)
 
@@ -249,21 +325,61 @@ def _draw_party_tile(
 
     pad = 8
     max_w = (x1 - x0) - pad * 2
-    dex_label = f"#{slot.dex_no:04d}"
-    draw.text((x0 + pad, y0 + pad), dex_label, font=dex_font, fill=COLOR_SUBTEXT)
+    cx = x0 + (x1 - x0) // 2
 
+    sprite_top = y0 + pad
+    if slot.sprite_path:
+        try:
+            with Image.open(slot.sprite_path) as sprite_img:
+                sprite_img = sprite_img.convert("RGBA").resize(
+                    (PARTY_SPRITE_SIZE, PARTY_SPRITE_SIZE), Image.Resampling.LANCZOS
+                )
+                card.paste(sprite_img, (cx - PARTY_SPRITE_SIZE // 2, sprite_top), sprite_img)
+        except Exception:
+            log.warning("Failed to composite party sprite from %r", slot.sprite_path, exc_info=True)
+
+    # Species name first, dex number below it (swapped order from the
+    # previous layout).
+    text_top = sprite_top + PARTY_SPRITE_SIZE + 6
     name = slot.display_name + (" ★" if slot.is_shiny else "")
     name = _truncate_to_width(name, name_font, max_w)
     name_color = COLOR_GOLD if slot.is_shiny else COLOR_TEXT
-    draw.text((x0 + pad, y0 + pad + 20), name, font=name_font, fill=name_color)
+    name_bbox = draw.textbbox((0, 0), name, font=name_font)
+    draw.text((cx - (name_bbox[2] - name_bbox[0]) // 2, text_top), name, font=name_font, fill=name_color)
 
-    draw.text((x0 + pad, y0 + pad + 44), f"Slot {slot.slot}", font=dex_font, fill=COLOR_SUBTEXT)
+    dex_label = f"#{slot.dex_no:04d}"
+    dex_bbox = draw.textbbox((0, 0), dex_label, font=dex_font)
+    draw.text(
+        (cx - (dex_bbox[2] - dex_bbox[0]) // 2, text_top + 18), dex_label, font=dex_font, fill=COLOR_SUBTEXT
+    )
+
+    # Slot number as a small corner badge (top-right) instead of a full
+    # "Slot {n}" text line.
+    badge_r = PARTY_SLOT_BADGE_SIZE // 2
+    badge_cx = x1 - 4 - badge_r
+    badge_cy = y0 + 4 + badge_r
+    draw.ellipse(
+        (badge_cx - badge_r, badge_cy - badge_r, badge_cx + badge_r, badge_cy + badge_r), fill=border
+    )
+    slot_text = str(slot.slot)
+    slot_bbox = draw.textbbox((0, 0), slot_text, font=dex_font)
+    badge_text_color = COLOR_BASE if slot.is_shiny else COLOR_TEXT
+    draw.text(
+        (
+            badge_cx - (slot_bbox[2] - slot_bbox[0]) // 2 - slot_bbox[0],
+            badge_cy - (slot_bbox[3] - slot_bbox[1]) // 2 - slot_bbox[1],
+        ),
+        slot_text,
+        font=dex_font,
+        fill=badge_text_color,
+    )
 
 
 def render_profile_panel(data: ProfileCardData) -> bytes:
     """Composite the stat-grid + EXP-bar + party-grid profile card and
-    return raw PNG bytes. Pure/synchronous/deterministic — no I/O beyond the
-    system DejaVu fonts."""
+    return raw PNG bytes. Pure/synchronous/deterministic — no network I/O
+    (party sprites are pre-fetched to local disk paths by the caller; see
+    module docstring)."""
     card = Image.new("RGB", (CARD_WIDTH, CARD_HEIGHT), COLOR_BASE)
     draw = ImageDraw.Draw(card)
 
@@ -284,12 +400,17 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
     ty = MARGIN + 14
     username = _truncate_to_width(data.username, header_font, CARD_WIDTH - MARGIN * 2 - 32)
     draw.text((tx, ty), username, font=header_font, fill=COLOR_TEXT)
-    draw.text(
-        (tx, ty + 38),
-        f"{data.title_badge}  ·  Level {data.level}",
-        font=sub_font,
-        fill=COLOR_SUBTEXT,
-    )
+
+    # Sub-line: "Level {N} · {title_badge}" (title_badge rendered as a
+    # chip, not plain inline text).
+    sub_y = ty + 38
+    level_text = f"Level {data.level} · "
+    draw.text((tx, sub_y), level_text, font=sub_font, fill=COLOR_SUBTEXT)
+    chip_x = tx + int(sub_font.getlength(level_text))
+    chip_right_limit = CARD_WIDTH - MARGIN - 16
+    chip_max_text_w = max(0, (chip_right_limit - chip_x) - CHIP_PAD_X * 2)
+    badge_text = _truncate_to_width(data.title_badge, sub_font, chip_max_text_w)
+    _draw_chip(draw, chip_x, sub_y - CHIP_PAD_Y, badge_text, sub_font, COLOR_BLURPLE, COLOR_TEXT)
 
     # --- EXP bar -----------------------------------------------------
     exp_y = MARGIN + HEADER_HEIGHT + EXP_GAP_ABOVE
@@ -298,10 +419,14 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
     bar_y0 = exp_y + EXP_LABEL_HEIGHT
     bar_box = (MARGIN, bar_y0, CARD_WIDTH - MARGIN, bar_y0 + EXP_BAR_HEIGHT)
     frac = 0.0 if data.exp_needed <= 0 else data.exp_current / data.exp_needed
-    _draw_gradient_bar(card, bar_box, frac)
+    if data.accent_color is not None:
+        bar_start, bar_end = _gradient_from_accent(data.accent_color)
+    else:
+        bar_start, bar_end = COLOR_GOLD, COLOR_GREEN
+    _draw_gradient_bar(card, bar_box, frac, bar_start, bar_end)
     draw = ImageDraw.Draw(card)  # re-bind after paste() mutated the underlying image
 
-    # --- Stat tile grid: Global / Per-Server / Accuracy / Pokédex / Shiny / Kudos
+    # --- Stat tile grid: Global / This Server / Streak / Pokédex / Shiny / Kudos
     grid_y = bar_y0 + EXP_BAR_HEIGHT + STAT_GAP_ABOVE
 
     def tile_box(col: int, row: int) -> tuple[int, int, int, int]:
@@ -312,15 +437,14 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
     _draw_stat_tile(
         card, draw, tile_box(0, 0), "Global",
         f"Lv {data.level}",
-        f"Streak {data.global_streak} (best {data.global_streak_best}) · {data.global_sketch_count} sketches",
+        f"{data.global_sketch_count} sketches total",
         stat_label_font, stat_value_font, stat_sub_font,
     )
     if data.server is not None:
         _draw_stat_tile(
             card, draw, tile_box(1, 0), "This Server",
             f"Lv {data.server.level}",
-            f"Streak {data.server.streak} (best {data.server.streak_best}) "
-            f"· {data.server.sketch_count} sketches",
+            f"{data.server.sketch_count} sketches here",
             stat_label_font, stat_value_font, stat_sub_font,
         )
     else:
@@ -330,10 +454,20 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
             "No per-server data yet",
             stat_label_font, stat_value_font, stat_sub_font,
         )
+
+    # Combined Streak tile (frees up D3 from the dropped Accuracy tile):
+    # global streak always shown, per-server streak on a second line (or
+    # the established "no per-server data" convention when data.server is
+    # None, same as the This Server tile above).
+    streak_subtext = (
+        f"Server: {data.server.streak} (best {data.server.streak_best})"
+        if data.server is not None
+        else "No per-server data yet"
+    )
     _draw_stat_tile(
-        card, draw, tile_box(2, 0), "Accuracy",
-        f"{data.accuracy_pct:.1f}%",
-        None,
+        card, draw, tile_box(2, 0), "Streak",
+        f"Global: {data.global_streak} (best {data.global_streak_best})",
+        streak_subtext,
         stat_label_font, stat_value_font, stat_sub_font,
     )
 
