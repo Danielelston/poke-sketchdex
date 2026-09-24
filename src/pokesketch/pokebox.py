@@ -22,7 +22,16 @@ from PIL import Image, ImageOps
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import selectinload
 
-from .db import CaughtMon, GlobalUser, GuildConfig, PokeballWallet, PokeBox, Submission, WildEncounterSubmission
+from .db import (
+    CaughtMon,
+    DailyPokemon,
+    GlobalUser,
+    GuildConfig,
+    PokeballWallet,
+    PokeBox,
+    Submission,
+    WildEncounterSubmission,
+)
 from .formatting import species_display_name
 
 log = logging.getLogger(__name__)
@@ -495,17 +504,26 @@ def _party_display_name(mon: CaughtMon) -> str:
 
 
 async def shiny_summary(s, user_id: int) -> tuple[int, str | None]:
-    """Return (distinct shiny species count, most-recently-caught shiny's
-    display name or None) across a user's whole collection (active party +
-    storage box — "have you ever caught a shiny", not just their current
-    active 6)."""
+    """Return (distinct shiny species count, most-recently-submitted shiny's
+    display name or None) across every guild.
+
+    Sourced from `Submission` joined to `DailyPokemon.is_shiny`, i.e. "how
+    many distinct shiny species has this user ever submitted a sketch for" —
+    NOT from `CaughtMon`. Catching (`/catch`) costs a pokeball and is capped
+    at 20 total, so gating this stat on CaughtMon under-counted: a user who
+    submitted a shiny but never spent a pokeball to catch it showed 0 shinies
+    despite having drawn it. Submitting is free and unlimited, so it's the
+    right source for "have you ever submitted a shiny". Wild-encounter
+    submissions are excluded since WildEncounterSubmission.is_shiny is always
+    False in v1 (no shiny mechanic there)."""
     rows = (
         await s.execute(
-            select(CaughtMon)
-            .where(CaughtMon.user_id == user_id, CaughtMon.is_shiny)
-            .order_by(desc(CaughtMon.caught_at))
+            select(DailyPokemon.dex_no, DailyPokemon.name, Submission.created_at)
+            .join(Submission, Submission.daily_id == DailyPokemon.id)
+            .where(Submission.user_id == user_id, DailyPokemon.is_shiny)
+            .order_by(desc(Submission.created_at))
         )
-    ).scalars().all()
+    ).all()
     if not rows:
         return 0, None
     distinct_species = len({r.dex_no for r in rows})
