@@ -149,6 +149,33 @@ class PokeApiClient:
             json.dump(trimmed, fh)
         return trimmed
 
+    def _sprite_cache_path(self, dex_no: int, shiny: bool) -> str:
+        sprites_dir = os.path.join(self.cache_dir, "sprites")
+        os.makedirs(sprites_dir, exist_ok=True)
+        suffix = "_shiny" if shiny else ""
+        return os.path.join(sprites_dir, f"{dex_no}{suffix}.png")
+
+    async def get_sprite_image_path(self, dex_no: int, shiny: bool = False) -> str | None:
+        """Fetch (once) + cache-to-disk-forever the official-artwork/sprite PNG
+        for a species — used to composite party thumbnails (e.g. the profile
+        card). Same cache-forever posture as `_fetch_raw`'s JSON cache, just
+        for the binary image. Returns None if PokeAPI has no image for this
+        species/shiny combination.
+        """
+        path = self._sprite_cache_path(dex_no, shiny)
+        if os.path.exists(path):
+            return path
+        ref = await self.get_pokemon(dex_no)
+        urls = ref.reference_images(shiny=shiny)
+        if not urls:
+            return None
+        log.info("Fetching sprite image: %s", urls[0])
+        resp = await self._client.get(urls[0])
+        resp.raise_for_status()
+        with open(path, "wb") as fh:
+            fh.write(resp.content)
+        return path
+
     async def get_pokemon(self, dex_no: int) -> PokemonRef:
         data = await self._fetch_raw(dex_no)
         sprites = data.get("sprites", {})
