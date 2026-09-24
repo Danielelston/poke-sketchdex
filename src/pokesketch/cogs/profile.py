@@ -190,8 +190,9 @@ def _build_card_data(
         PartyCardSlot(
             slot=mon.slot,
             dex_no=mon.dex_no,
-            display_name=mon.nickname or pokebox.species_display_name(mon.name),
+            species_name=pokebox.species_display_name(mon.name),
             is_shiny=mon.is_shiny,
+            nickname=mon.nickname,
             sprite_path=sprite_paths.get(mon.slot),
             mon_level=mon.mon_level,
         )

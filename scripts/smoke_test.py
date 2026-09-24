@@ -2204,7 +2204,7 @@ async def main() -> None:
     assert data.server.sketch_count == 3, data.server.sketch_count
     assert data.global_streak == 6, data.global_streak
     assert data.global_sketch_count == 3, data.global_sketch_count
-    assert any("Pikachu" in p.display_name and p.is_shiny for p in data.party), data.party
+    assert any("Pikachu" in p.species_name and p.is_shiny for p in data.party), data.party
     assert data.shiny_count == 1, data.shiny_count
     assert data.kudos_count == 0, data.kudos_count
 
@@ -2397,7 +2397,7 @@ async def main() -> None:
             shiny_count=3,
             shiny_example="Charizard",
             kudos_count=5,
-            party=[_PCSlot(slot=1, dex_no=25, display_name="Pikachu", is_shiny=False)],
+            party=[_PCSlot(slot=1, dex_no=25, species_name="Pikachu", is_shiny=False)],
             server=_PCServer(level=5, streak=2, streak_best=4, sketch_count=3),
         )
         base.update(overrides)
@@ -2411,7 +2411,7 @@ async def main() -> None:
     _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=[]))), "empty party")
 
     full_party = [
-        _PCSlot(slot=i + 1, dex_no=i * 7 + 1, display_name=f"Mon{i}", is_shiny=(i % 2 == 0)) for i in range(6)
+        _PCSlot(slot=i + 1, dex_no=i * 7 + 1, species_name=f"Mon{i}", is_shiny=(i % 2 == 0)) for i in range(6)
     ]
     _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=full_party))), "full 6-mon party")
 
@@ -2471,16 +2471,19 @@ async def main() -> None:
     # Image.open()+composite path is exercised directly against a real tiny
     # on-disk PNG fixture (reusing fake_sprite_path), not a mock.
     mixed_party = [
-        _PCSlot(slot=1, dex_no=6, display_name="Charizard", is_shiny=True, sprite_path=fake_sprite_path),
-        _PCSlot(slot=2, dex_no=9, display_name="Blastoise", is_shiny=False, sprite_path=fake_sprite_path),
-        _PCSlot(slot=3, dex_no=3, display_name="Venusaur", is_shiny=False, sprite_path=None),
+        _PCSlot(
+            slot=1, dex_no=6, species_name="Charizard", is_shiny=True, sprite_path=fake_sprite_path,
+            nickname="Blaze",
+        ),
+        _PCSlot(slot=2, dex_no=9, species_name="Blastoise", is_shiny=False, sprite_path=fake_sprite_path),
+        _PCSlot(slot=3, dex_no=3, species_name="Venusaur", is_shiny=False, sprite_path=None),
         # Slots 4-6 omitted -> rendered as empty placeholders.
     ]
     _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=mixed_party))), "mixed party with sprites")
     # A bogus sprite path (file doesn't exist) must be skipped gracefully,
     # not crash the whole render.
     bogus_party = [
-        _PCSlot(slot=1, dex_no=1, display_name="Bulbasaur", is_shiny=False, sprite_path="/nonexistent/x.png")
+        _PCSlot(slot=1, dex_no=1, species_name="Bulbasaur", is_shiny=False, sprite_path="/nonexistent/x.png")
     ]
     _assert_valid_png(_render_panel(_PCData(**_base_card_kwargs(party=bogus_party))), "missing sprite file")
     print(

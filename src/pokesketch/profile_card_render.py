@@ -101,12 +101,8 @@ PARTY_SLOTS = 6
 PARTY_COLS = 3
 PARTY_ROWS = 2
 PARTY_TILE_GAP = 12
-PARTY_TILE_HEIGHT = 138
 PARTY_TILE_WIDTH = (CARD_WIDTH - MARGIN * 2 - PARTY_TILE_GAP * (PARTY_COLS - 1)) // PARTY_COLS
 PARTY_TILE_BORDER_WIDTH = 2
-PARTY_SECTION_HEIGHT = (
-    PARTY_LABEL_HEIGHT + PARTY_TILE_HEIGHT * PARTY_ROWS + PARTY_TILE_GAP * (PARTY_ROWS - 1)
-)
 PARTY_NAME_FONT_SIZE = 14
 PARTY_DEX_FONT_SIZE = 12
 PARTY_SPRITE_SIZE = 44
@@ -115,6 +111,32 @@ PARTY_TILE_RADIUS = 10  # must match the radius passed to _draw_panel() for part
 PARTY_LEVEL_BADGE_PAD_X = 8  # smaller than the header's level badge (party tiles are narrow)
 PARTY_LEVEL_BADGE_PAD_Y = 4
 PARTY_LEVEL_FONT_SIZE = 11
+
+# Image/sketch-canvas area: reserves the MOST vertical room in the tile since
+# this is where a future "user sketches here" canvas will live (sprite is a
+# stand-in for now) — per user direction (2026-09-24): "Let the sprite
+# section hold the most space because we plan to let the users sketch in the
+# future here instead of the sprite."
+PARTY_IMAGE_MARGIN = 8  # inset from the tile's own top/left/right edges
+PARTY_IMAGE_HEIGHT = 90
+PARTY_IMAGE_RADIUS = 8
+PARTY_IMAGE_GAP_BELOW = 8
+PARTY_NAME_LINE_HEIGHT = 22  # nickname (or species fallback) + Lv. badge, same row
+PARTY_TEXT_LINE_GAP = 2
+PARTY_SPECIES_LINE_HEIGHT = 16  # "{species} #{dex}" — only drawn when a nickname is set
+PARTY_BOTTOM_PAD = 8
+PARTY_TILE_HEIGHT = (
+    PARTY_IMAGE_MARGIN
+    + PARTY_IMAGE_HEIGHT
+    + PARTY_IMAGE_GAP_BELOW
+    + PARTY_NAME_LINE_HEIGHT
+    + PARTY_TEXT_LINE_GAP
+    + PARTY_SPECIES_LINE_HEIGHT
+    + PARTY_BOTTOM_PAD
+)
+PARTY_SECTION_HEIGHT = (
+    PARTY_LABEL_HEIGHT + PARTY_TILE_HEIGHT * PARTY_ROWS + PARTY_TILE_GAP * (PARTY_ROWS - 1)
+)
 
 CARD_HEIGHT = (
     MARGIN
@@ -140,8 +162,13 @@ class ServerCardStats:
 class PartyCardSlot:
     slot: int
     dex_no: int
-    display_name: str
+    # Species display name (e.g. "Lucario") — always present, unlike nickname.
+    species_name: str
     is_shiny: bool
+    # User-set cosmetic nickname (CaughtMon.nickname), separate from
+    # species_name so the render can show BOTH per the mock's two-line
+    # layout ("AuraKnight" / "Lucario #0448") instead of collapsing to one.
+    nickname: str | None = None
     # Local file path to a cached official-artwork PNG (fetched by the async
     # caller via pokeapi.PokeApiClient.get_sprite_image_path — this render
     # module stays synchronous and just opens+composites it), or None if no
@@ -544,52 +571,72 @@ def _draw_party_tile(
     )
 
     pad = 8
-    max_w = (x1 - x0) - pad * 2
-    cx = x0 + (x1 - x0) // 2
+    text_left = x0 + pad
+    text_right = x1 - pad
+    max_w = text_right - text_left
 
-    sprite_top = y0 + pad
+    # Image/sketch-canvas area — holds the MOST space in the tile, since
+    # this is a stand-in for a future user-drawn sketch, not just a sprite
+    # thumbnail. A slightly-darker rounded panel gives it a distinct
+    # "canvas" feel even before real sketch uploads exist.
+    image_box = (
+        x0 + PARTY_IMAGE_MARGIN, y0 + PARTY_IMAGE_MARGIN,
+        x1 - PARTY_IMAGE_MARGIN, y0 + PARTY_IMAGE_MARGIN + PARTY_IMAGE_HEIGHT,
+    )
+    _draw_panel(draw, image_box, fill=COLOR_BASE, outline=None, radius=PARTY_IMAGE_RADIUS)
     if slot.sprite_path:
         try:
             with Image.open(slot.sprite_path) as sprite_img:
                 sprite_img = sprite_img.convert("RGBA").resize(
                     (PARTY_SPRITE_SIZE, PARTY_SPRITE_SIZE), Image.Resampling.LANCZOS
                 )
-                card.paste(sprite_img, (cx - PARTY_SPRITE_SIZE // 2, sprite_top), sprite_img)
+                sprite_cx = (image_box[0] + image_box[2]) // 2
+                sprite_cy = (image_box[1] + image_box[3]) // 2
+                card.paste(
+                    sprite_img,
+                    (sprite_cx - PARTY_SPRITE_SIZE // 2, sprite_cy - PARTY_SPRITE_SIZE // 2),
+                    sprite_img,
+                )
         except Exception:
             log.warning("Failed to composite party sprite from %r", slot.sprite_path, exc_info=True)
 
-    # Species name first, dex number below it (swapped order from the
-    # previous layout).
-    text_top = sprite_top + PARTY_SPRITE_SIZE + 6
-    name = slot.display_name + (" ★" if slot.is_shiny else "")
-    name = _truncate_to_width(name, name_font, max_w)
-    name_color = COLOR_GOLD if slot.is_shiny else COLOR_TEXT
-    name_bbox = draw.textbbox((0, 0), name, font=name_font)
-    draw.text((cx - (name_bbox[2] - name_bbox[0]) // 2, text_top), name, font=name_font, fill=name_color)
-
-    dex_label = f"#{slot.dex_no:04d}"
-    dex_bbox = draw.textbbox((0, 0), dex_label, font=dex_font)
-    draw.text(
-        (cx - (dex_bbox[2] - dex_bbox[0]) // 2, text_top + 18), dex_label, font=dex_font, fill=COLOR_SUBTEXT
-    )
-
-    # Level badge (small "Lv. {N}" box, same _draw_level_badge() style as
-    # the header) below the dex number, centered. CaughtMon.mon_level is a
-    # reserved/unused leveling-stretch-phase column (always 1 today) — see
-    # module docstring — shown anyway per explicit user direction.
+    # Row 1: nickname (falls back to species name if unset, per explicit
+    # user direction 2026-09-24 — no "Unnamed" placeholder, no duplicate
+    # species line when there's no nickname) on the left, "Lv. {N}" badge
+    # right-aligned on the same row.
+    name_row_y = image_box[3] + PARTY_IMAGE_GAP_BELOW
     level_text = f"Lv. {slot.mon_level}"
     level_bbox = draw.textbbox((0, 0), level_text, font=level_badge_font)
     level_badge_w = int((level_bbox[2] - level_bbox[0]) + PARTY_LEVEL_BADGE_PAD_X * 2)
-    level_y = text_top + 18 + PARTY_DEX_FONT_SIZE + 8
+    level_badge_h = int((level_bbox[3] - level_bbox[1]) + PARTY_LEVEL_BADGE_PAD_Y * 2)
+    level_x = text_right - level_badge_w
+    level_y = name_row_y + (PARTY_NAME_LINE_HEIGHT - level_badge_h) // 2
     _draw_level_badge(
-        draw, cx - level_badge_w // 2, level_y, level_text, level_badge_font,
+        draw, level_x, level_y, level_text, level_badge_font,
         pad_x=PARTY_LEVEL_BADGE_PAD_X, pad_y=PARTY_LEVEL_BADGE_PAD_Y,
     )
+
+    display_name = slot.nickname or slot.species_name
+    name_max_w = max(0, (level_x - 6) - text_left)  # stop short of the level badge
+    display_name = _truncate_to_width(display_name, name_font, name_max_w)
+    name_color = COLOR_GOLD if slot.is_shiny else COLOR_TEXT
+    name_bbox = draw.textbbox((0, 0), display_name, font=name_font)
+    name_text_y = name_row_y + (PARTY_NAME_LINE_HEIGHT - (name_bbox[3] - name_bbox[1])) // 2 - name_bbox[1]
+    draw.text((text_left, name_text_y), display_name, font=name_font, fill=name_color)
+
+    # Row 2: "{species} #{dex}" — only drawn when a nickname is set (the
+    # mock always shows both lines, but with no nickname that would just
+    # duplicate row 1's already-shown species name).
+    if slot.nickname:
+        species_row_y = name_row_y + PARTY_NAME_LINE_HEIGHT + PARTY_TEXT_LINE_GAP
+        species_label = f"{slot.species_name} #{slot.dex_no:04d}"
+        species_label = _truncate_to_width(species_label, dex_font, max_w)
+        draw.text((text_left, species_row_y), species_label, font=dex_font, fill=COLOR_SUBTEXT)
 
     # Slot number as a small corner-ribbon badge (top-right) instead of a
     # plain circle — flush with the tile's own rounded corner, concave inner
     # arc, per the mockup reference the user supplied. Bold font for
-    # legibility (was the same regular dex_font).
+    # legibility.
     badge_text_color = COLOR_BASE if slot.is_shiny else COLOR_TEXT
     _draw_corner_ribbon_badge(
         card, box, str(slot.slot), slot_badge_font, bg_color=border, text_color=badge_text_color
