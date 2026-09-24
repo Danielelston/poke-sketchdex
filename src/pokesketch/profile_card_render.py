@@ -102,7 +102,6 @@ PARTY_COLS = 3
 PARTY_ROWS = 2
 PARTY_TILE_GAP = 12
 PARTY_TILE_WIDTH = (CARD_WIDTH - MARGIN * 2 - PARTY_TILE_GAP * (PARTY_COLS - 1)) // PARTY_COLS
-PARTY_TILE_BORDER_WIDTH = 2
 PARTY_NAME_FONT_SIZE = 14
 PARTY_DEX_FONT_SIZE = 12
 PARTY_SPRITE_SIZE = 44
@@ -565,10 +564,7 @@ def _draw_party_tile(
         return
 
     border = COLOR_GOLD if slot.is_shiny else COLOR_BLURPLE
-    _draw_panel(
-        draw, box, fill=COLOR_SURFACE, outline=border, outline_width=PARTY_TILE_BORDER_WIDTH,
-        radius=PARTY_TILE_RADIUS,
-    )
+    _draw_panel(draw, box, fill=COLOR_SURFACE, outline=None, radius=PARTY_TILE_RADIUS)
 
     pad = 8
     text_left = x0 + pad
@@ -627,14 +623,20 @@ def _draw_party_tile(
     # Row 2: always drawn now — "{species} #{dex}" when a nickname is set
     # (row 1 already shows the nickname, so this adds the species context),
     # or just "#{dex}" when there's no nickname (row 1 already shows the
-    # species name, so repeating it here would be redundant).
+    # species name, so repeating it here would be redundant). Shiny mons get
+    # a leading star emoji: "★ {species} #{dex}" / "★ #{dex}" — per user
+    # direction (2026-09-24): the tile border ring was dropped, so shiny
+    # status is now conveyed by gold badge + gold name + this star only.
     species_row_y = name_row_y + PARTY_NAME_LINE_HEIGHT + PARTY_TEXT_LINE_GAP
     if slot.nickname:
         species_label = f"{slot.species_name} #{slot.dex_no:04d}"
     else:
         species_label = f"#{slot.dex_no:04d}"
+    if slot.is_shiny:
+        species_label = f"★ {species_label}"
     species_label = _truncate_to_width(species_label, dex_font, max_w)
-    draw.text((text_left, species_row_y), species_label, font=dex_font, fill=COLOR_SUBTEXT)
+    species_color = COLOR_GOLD if slot.is_shiny else COLOR_SUBTEXT
+    draw.text((text_left, species_row_y), species_label, font=dex_font, fill=species_color)
 
     # Slot number as a small corner-ribbon badge (top-right) instead of a
     # plain circle — flush with the tile's own rounded corner, concave inner
