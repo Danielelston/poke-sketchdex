@@ -62,7 +62,7 @@ MARGIN = 24
 PANEL_RADIUS = 14
 
 # --- Header -----------------------------------------------------------
-HEADER_HEIGHT = 90
+HEADER_HEIGHT = 104
 HEADER_FONT_SIZE = 30
 HEADER_SUB_FONT_SIZE = 20
 HEADER_AVATAR_SIZE = 64  # circular, left-aligned within the header panel
