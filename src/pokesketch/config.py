@@ -28,6 +28,7 @@ class Config:
     db_path: str = "data/pokesketch.db"
     image_cache_dir: str = "data/images_cache"
     party_cache_dir: str = "data/party_cache"
+    badge_cache_dir: str = "data/badge_cache"
     log_level: str = "INFO"
 
     @classmethod
@@ -47,6 +48,9 @@ class Config:
             ).strip(),
             party_cache_dir=os.getenv(
                 "POKESKETCH_PARTY_CACHE_DIR", "data/party_cache"
+            ).strip(),
+            badge_cache_dir=os.getenv(
+                "POKESKETCH_BADGE_CACHE_DIR", "data/badge_cache"
             ).strip(),
             log_level=os.getenv("POKESKETCH_LOG_LEVEL", "INFO").strip().upper(),
         )
