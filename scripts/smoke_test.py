@@ -1871,6 +1871,160 @@ async def main() -> None:
     assert len(empty_channel.sent) == 0, empty_channel.sent
     print("daily spotlight OK: no-submissions day posts nothing and does not crash")
 
+    # --- Player Profile Card & Poké Ball Rank Badges --------------------
+    from pokesketch import cards, rank_badges
+
+    # rank_for_level: exact threshold levels map to the correct tier, and
+    # off-by-one below/above each threshold lands on the adjacent tier.
+    assert rank_badges.rank_for_level(1) == "Poké Ball"
+    assert rank_badges.rank_for_level(4) == "Poké Ball"
+    assert rank_badges.rank_for_level(5) == "Great Ball"
+    assert rank_badges.rank_for_level(11) == "Great Ball"
+    assert rank_badges.rank_for_level(12) == "Ultra Ball"
+    assert rank_badges.rank_for_level(19) == "Ultra Ball"
+    assert rank_badges.rank_for_level(20) == "Premier Ball"
+    assert rank_badges.rank_for_level(29) == "Premier Ball"
+    assert rank_badges.rank_for_level(30) == "Luxury Ball"
+    assert rank_badges.rank_for_level(44) == "Luxury Ball"
+    assert rank_badges.rank_for_level(45) == "Master Ball"
+    assert rank_badges.rank_for_level(999) == "Master Ball"
+    assert rank_badges.rank_for_level(0) == "Poké Ball"  # defensive: below the first threshold
+    print("rank_for_level OK: every tier boundary maps correctly, off-by-one on both sides holds")
+
+    # get_tier_assets: full pre-render pipeline (fetch -> composite -> cache),
+    # network faked so this stays offline, same pattern as pokebox._cache_image
+    # above. Confirms both output files exist, are sized/opacity as expected,
+    # and a second call is a pure cache hit (no re-fetch).
+    from PIL import Image as _BadgeImage
+
+    fake_raw_dir = os.path.join(tmp, "fake_raw_ball")
+    os.makedirs(fake_raw_dir, exist_ok=True)
+    fake_raw_path = os.path.join(fake_raw_dir, "fake-ball.png")
+    _BadgeImage.new("RGBA", (128, 128), (255, 0, 0, 255)).save(fake_raw_path, format="PNG")
+
+    fetch_calls: list[str] = []
+
+    async def _fake_fetch_ball_sprite(tier_name, cache_dir):
+        fetch_calls.append(tier_name)
+        return fake_raw_path
+
+    rank_badges.fetch_ball_sprite = _fake_fetch_ball_sprite
+
+    badge_cache_dir = os.path.join(tmp, "badge_cache")
+    canvas_size = (300, 200)
+    corner_path, full_bleed_path = await rank_badges.get_tier_assets("Great Ball", canvas_size, badge_cache_dir)
+    assert os.path.exists(corner_path) and os.path.exists(full_bleed_path)
+    with _BadgeImage.open(corner_path) as corner_img:
+        assert corner_img.size == (rank_badges.CORNER_EMBLEM_SIZE, rank_badges.CORNER_EMBLEM_SIZE), corner_img.size
+    with _BadgeImage.open(full_bleed_path) as bg_img:
+        assert bg_img.size == canvas_size, bg_img.size
+        # Center pixel should carry the faded ball color at ~15% alpha (still
+        # on a transparent canvas, so alpha reflects the fade directly).
+        center_alpha = bg_img.getpixel((canvas_size[0] // 2, canvas_size[1] // 2))[3]
+        expected_alpha = int(255 * rank_badges.FULL_BLEED_OPACITY)
+        assert abs(center_alpha - expected_alpha) <= 2, (center_alpha, expected_alpha)
+    assert fetch_calls == ["Great Ball"], fetch_calls
+
+    corner_path2, full_bleed_path2 = await rank_badges.get_tier_assets("Great Ball", canvas_size, badge_cache_dir)
+    assert (corner_path2, full_bleed_path2) == (corner_path, full_bleed_path)
+    assert fetch_calls == ["Great Ball"], fetch_calls  # cache hit: no second fetch
+    print(
+        "get_tier_assets OK: corner/full-bleed assets rendered at expected size/opacity, "
+        "cache hit skips re-fetch"
+    )
+
+    # render_profile_card: valid, non-empty PNG bytes across the range the
+    # design doc calls out — empty party, full 6-mon party, a max-length
+    # username, lowest tier, and a high (highest-tier) level.
+    party_sprite_dir = os.path.join(tmp, "fake_party_sprites")
+    os.makedirs(party_sprite_dir, exist_ok=True)
+    fake_sprite_paths = []
+    for i in range(6):
+        p = os.path.join(party_sprite_dir, f"mon{i}.png")
+        _BadgeImage.new("RGBA", (100 + i * 20, 80), (0, 200, 0, 255)).save(p, format="PNG")
+        fake_sprite_paths.append(p)
+
+    def _assert_valid_png(png_bytes: bytes) -> tuple[int, int]:
+        assert isinstance(png_bytes, bytes) and len(png_bytes) > 0
+        with _BadgeImage.open(io.BytesIO(png_bytes)) as img:
+            img.verify()
+        with _BadgeImage.open(io.BytesIO(png_bytes)) as img:
+            return img.size
+
+    empty_party_png = cards.render_profile_card(
+        "NoPartyUser", 1, "Poké Ball", 0, 50, 0, 0, [], corner_path, full_bleed_path
+    )
+    size_empty = _assert_valid_png(empty_party_png)
+    assert size_empty == cards.CARD_SIZE, size_empty
+
+    full_party_png = cards.render_profile_card(
+        "FullPartyUser", 8, "Ultra Ball", 40, 100, 5, 42, fake_sprite_paths, corner_path, full_bleed_path
+    )
+    _assert_valid_png(full_party_png)
+
+    long_username = "X" * 64
+    long_name_png = cards.render_profile_card(
+        long_username, 10, "Ultra Ball", 0, 100, 3, 10, fake_sprite_paths[:3], corner_path, full_bleed_path
+    )
+    _assert_valid_png(long_name_png)
+
+    low_level_png = cards.render_profile_card(
+        "LowLevel", 1, rank_badges.rank_for_level(1), 0, 50, 0, 0, [], corner_path, full_bleed_path
+    )
+    _assert_valid_png(low_level_png)
+
+    high_level_png = cards.render_profile_card(
+        "HighLevel", 60, rank_badges.rank_for_level(60), 500, 1000, 30, 500,
+        fake_sprite_paths, corner_path, full_bleed_path,
+    )
+    _assert_valid_png(high_level_png)
+    print(
+        "render_profile_card OK: valid non-empty PNG bytes for 0/6-mon party, "
+        f"a {len(long_username)}-char username, level 1, and a high level"
+    )
+
+    # Manual timing sanity check with the real compositing code (not a hard
+    # requirement, but good practice per the design doc) — should stay well
+    # under Discord's 3s ack window.
+    import time as _time
+
+    _render_start = _time.monotonic()
+    cards.render_profile_card(
+        "TimingCheckUser", 25, rank_badges.rank_for_level(25), 40, 100, 12, 88,
+        fake_sprite_paths, corner_path, full_bleed_path,
+    )
+    _render_elapsed = _time.monotonic() - _render_start
+    assert _render_elapsed < 3.0, _render_elapsed
+    print(f"render_profile_card timing OK: {_render_elapsed * 1000:.1f}ms (well under the 3s ack window)")
+
+    # PokeApiClient.get_sprite_image_path: cache-hit branch returns the
+    # existing file without touching the network (mirrors pokebox's
+    # cache-forever tests above).
+    from pokesketch.pokeapi import PokeApiClient
+
+    sprite_cache_root = os.path.join(tmp, "sprite_cache_root")
+    api_client_for_sprites = PokeApiClient(sprite_cache_root)
+    precached_path = api_client_for_sprites._sprite_cache_path(999999, shiny=False)
+    os.makedirs(os.path.dirname(precached_path), exist_ok=True)
+    with open(precached_path, "wb") as fh:
+        fh.write(b"fake-sprite-bytes")
+    resolved_path = await api_client_for_sprites.get_sprite_image_path(999999, shiny=False)
+    assert resolved_path == precached_path, (resolved_path, precached_path)
+    await api_client_for_sprites.aclose()
+    print("get_sprite_image_path OK: a cached sprite is returned without a network fetch")
+
+    # /help: /profile-card is documented alongside /profile.
+    from pokesketch.cogs.help import Help as _HelpForCardCheck
+
+    help_cog3 = _HelpForCardCheck(bot=None)
+    help_interaction3 = _FakeHelpInteraction()
+    await help_cog3.help_cmd.callback(help_cog3, help_interaction3)
+    help_embed3 = help_interaction3.response.sent_embed
+    _assert_embed_within_discord_limits(help_embed3)
+    help_text3 = "\n".join(f.value for f in help_embed3.fields)
+    assert "/profile-card" in help_text3, help_text3
+    print("help OK: /profile-card documented in /help alongside /profile")
+
     print("ALL SMOKE TESTS PASSED")
 
 
