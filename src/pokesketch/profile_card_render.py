@@ -18,11 +18,13 @@ follows, and the module-level color tokens below, which are the LOCKED design
 tokens for THIS render — not the raw Discord-Activity-UI palette dump in
 assets/user_profile_card/DESIGN.md): an identity/header area (with a
 chip-styled title badge), a gradient EXP bar (accent-color-driven when the
-target has a Discord accent color, gold-to-green otherwise), a 3x2 grid of
-stat tiles (Global / This Server / Streak / Pokédex / Shiny / Kudos), and a
-row of 6 party tiles (always 6 slots, empty ones rendered as placeholders)
-with per-mon borders (gold for shiny, blurple otherwise) and an official-
-artwork sprite. Deliberately does NOT reproduce the mockup's full-bleed
+target has a Discord accent color, gold-to-green otherwise), a mobile-
+friendly 2x3 grid of stat tiles (Global / This Server / Streak / Pokédex /
+Shiny / Kudos), and a mobile-friendly 3x2 grid of party tiles (always 6
+slots, empty ones rendered as placeholders) with per-mon borders (gold for
+shiny, blurple otherwise) and an official-artwork sprite. The card is taller
+than it is wide (CARD_WIDTH=560) so it reads well on a phone screen without
+horizontal scrolling. Deliberately does NOT reproduce the mockup's full-bleed
 watermark background (see rank_badges.py's module docstring for why that was
 dropped) and does NOT render any per-mon level (`CaughtMon.mon_level` is a
 reserved/unused fake stat elsewhere in this codebase — see cogs/profile.py —
@@ -55,7 +57,7 @@ COLOR_MUTED_BORDER = (0x3F, 0x41, 0x47)
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-CARD_WIDTH = 984
+CARD_WIDTH = 560
 MARGIN = 24
 PANEL_RADIUS = 14
 
@@ -75,10 +77,10 @@ EXP_BAR_HEIGHT = 18
 EXP_BAR_RADIUS = 9
 EXP_SECTION_HEIGHT = EXP_GAP_ABOVE + EXP_LABEL_HEIGHT + EXP_BAR_HEIGHT
 
-# --- Stat tile grid: 3 columns x 2 rows ---------------------------------
+# --- Stat tile grid: mobile-friendly 2 columns x 3 rows ------------------
 STAT_GAP_ABOVE = 20
-STAT_COLS = 3
-STAT_ROWS = 2
+STAT_COLS = 2
+STAT_ROWS = 3
 STAT_TILE_GAP = 12
 STAT_TILE_HEIGHT = 92
 STAT_TILE_WIDTH = (CARD_WIDTH - MARGIN * 2 - STAT_TILE_GAP * (STAT_COLS - 1)) // STAT_COLS
@@ -87,15 +89,19 @@ STAT_LABEL_FONT_SIZE = 14
 STAT_VALUE_FONT_SIZE = 24
 STAT_SUB_FONT_SIZE = 14
 
-# --- Party grid: always 6 slots ------------------------------------------
+# --- Party grid: always 6 slots, mobile-friendly 3 columns x 2 rows -------
 PARTY_GAP_ABOVE = 20
 PARTY_LABEL_HEIGHT = 24
 PARTY_SLOTS = 6
+PARTY_COLS = 3
+PARTY_ROWS = 2
 PARTY_TILE_GAP = 12
 PARTY_TILE_HEIGHT = 104
-PARTY_TILE_WIDTH = (CARD_WIDTH - MARGIN * 2 - PARTY_TILE_GAP * (PARTY_SLOTS - 1)) // PARTY_SLOTS
+PARTY_TILE_WIDTH = (CARD_WIDTH - MARGIN * 2 - PARTY_TILE_GAP * (PARTY_COLS - 1)) // PARTY_COLS
 PARTY_TILE_BORDER_WIDTH = 2
-PARTY_SECTION_HEIGHT = PARTY_LABEL_HEIGHT + PARTY_TILE_HEIGHT
+PARTY_SECTION_HEIGHT = (
+    PARTY_LABEL_HEIGHT + PARTY_TILE_HEIGHT * PARTY_ROWS + PARTY_TILE_GAP * (PARTY_ROWS - 1)
+)
 PARTY_NAME_FONT_SIZE = 14
 PARTY_DEX_FONT_SIZE = 12
 PARTY_SPRITE_SIZE = 44
@@ -483,51 +489,56 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
             stat_label_font, stat_value_font, stat_sub_font,
         )
 
-    # Combined Streak tile (frees up D3 from the dropped Accuracy tile):
-    # global streak always shown, per-server streak on a second line (or
-    # the established "no per-server data" convention when data.server is
-    # None, same as the This Server tile above).
+    # Combined Streak tile (frees up the third slot from the dropped
+    # Accuracy tile): global streak always shown, per-server streak on a
+    # second line (or the established "no per-server data" convention when
+    # data.server is None, same as the This Server tile above). Uses a
+    # compact "G:14 (best 31)" format (not "Global: 14 (best 31)") since the
+    # narrower mobile-layout tile can't fit the verbose form at the stat
+    # value font size without truncating.
     streak_subtext = (
-        f"Server: {data.server.streak} (best {data.server.streak_best})"
+        f"S: {data.server.streak} (best {data.server.streak_best})"
         if data.server is not None
         else "No per-server data yet"
     )
     _draw_stat_tile(
-        card, draw, tile_box(2, 0), "Streak",
-        f"Global: {data.global_streak} (best {data.global_streak_best})",
+        card, draw, tile_box(0, 1), "Streak",
+        f"G: {data.global_streak} (best {data.global_streak_best})",
         streak_subtext,
         stat_label_font, stat_value_font, stat_sub_font,
     )
 
     dex_pct = (data.dex_scanned / data.dex_total * 100) if data.dex_total else 0.0
     _draw_stat_tile(
-        card, draw, tile_box(0, 1), "Pokédex",
+        card, draw, tile_box(1, 1), "Pokédex",
         f"{data.dex_scanned}/{data.dex_total}",
         f"{dex_pct:.1f}% complete",
         stat_label_font, stat_value_font, stat_sub_font,
     )
     shiny_sub = f"Latest: {data.shiny_example}" if data.shiny_example else None
     _draw_stat_tile(
-        card, draw, tile_box(1, 1), "Shiny",
+        card, draw, tile_box(0, 2), "Shiny",
         f"{data.shiny_count} species ★",
         shiny_sub,
         stat_label_font, stat_value_font, stat_sub_font,
     )
     _draw_stat_tile(
-        card, draw, tile_box(2, 1), "Kudos",
+        card, draw, tile_box(1, 2), "Kudos",
         str(data.kudos_count),
         None,
         stat_label_font, stat_value_font, stat_sub_font,
     )
 
-    # --- Party grid: always 6 slots ----------------------------------
+    # --- Party grid: always 6 slots, 3 columns x 2 rows ----------------
     party_label_y = grid_y + STAT_GRID_HEIGHT + PARTY_GAP_ABOVE
     draw.text((MARGIN, party_label_y), "ACTIVE PARTY", font=section_label_font, fill=COLOR_SUBTEXT)
     party_y0 = party_label_y + PARTY_LABEL_HEIGHT
     slots_in_order = data.party[:PARTY_SLOTS]
     for i in range(PARTY_SLOTS):
-        x0 = MARGIN + i * (PARTY_TILE_WIDTH + PARTY_TILE_GAP)
-        box = (x0, party_y0, x0 + PARTY_TILE_WIDTH, party_y0 + PARTY_TILE_HEIGHT)
+        col, row = i % PARTY_COLS, i // PARTY_COLS
+        x0 = MARGIN + col * (PARTY_TILE_WIDTH + PARTY_TILE_GAP)
+        y0 = party_y0 + row * (PARTY_TILE_HEIGHT + PARTY_TILE_GAP)
+        box = (x0, y0, x0 + PARTY_TILE_WIDTH, y0 + PARTY_TILE_HEIGHT)
         slot_data = slots_in_order[i] if i < len(slots_in_order) else None
         _draw_party_tile(card, draw, box, slot_data, party_name_font, party_dex_font)
 
