@@ -68,6 +68,7 @@ HEADER_SUB_FONT_SIZE = 20
 HEADER_AVATAR_SIZE = 64  # circular, left-aligned within the header panel
 HEADER_AVATAR_MARGIN = 16  # gap from the header panel's left/top edge
 HEADER_USERNAME_SUB_GAP = 46  # vertical gap from username baseline to the level badge/chip sub-line
+HEADER_AVATAR_RING_WIDTH = 3  # thickness of the avatar's border ring
 
 # --- Header title-badge chip (MUI-chip-style pill) ----------------------
 CHIP_PAD_X = 11
@@ -238,11 +239,17 @@ def _draw_circular_avatar(
         )
         card.paste(circle, (x0, y0), circle)
 
-    # Thin ring so the avatar reads as a distinct element against the
-    # header panel's surface color, same border-accent language the party
-    # tiles use (gold/blurple outline).
+    # Ring so the avatar reads as a distinct element against the header
+    # panel's surface color, same border-accent language the party tiles
+    # use (gold/blurple outline). Inset scales with the ring width so a
+    # thicker ring doesn't eat further into the avatar image itself.
     ring = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    ImageDraw.Draw(ring).ellipse((1, 1, size - 2, size - 2), outline=border_color, width=2)
+    inset = HEADER_AVATAR_RING_WIDTH // 2
+    ImageDraw.Draw(ring).ellipse(
+        (inset, inset, size - 1 - inset, size - 1 - inset),
+        outline=border_color,
+        width=HEADER_AVATAR_RING_WIDTH,
+    )
     card.paste(ring, (x0, y0), ring)
 
 
