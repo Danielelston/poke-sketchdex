@@ -99,7 +99,8 @@ PARTY_SECTION_HEIGHT = PARTY_LABEL_HEIGHT + PARTY_TILE_HEIGHT
 PARTY_NAME_FONT_SIZE = 14
 PARTY_DEX_FONT_SIZE = 12
 PARTY_SPRITE_SIZE = 44
-PARTY_SLOT_BADGE_SIZE = 18
+PARTY_SLOT_BADGE_SIZE = 30  # corner-ribbon badge, not a circle — see _draw_corner_ribbon_badge
+PARTY_TILE_RADIUS = 10  # must match the radius passed to _draw_panel() for party tiles
 
 CARD_HEIGHT = (
     MARGIN
@@ -296,6 +297,49 @@ def _draw_stat_tile(
         draw.text((tx, y0 + pad + 52), subtext, font=sub_font, fill=COLOR_SUBTEXT)
 
 
+def _draw_corner_ribbon_badge(
+    card: Image.Image,
+    box: tuple[int, int, int, int],
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    bg_color: tuple[int, int, int],
+    text_color: tuple[int, int, int],
+    size: int = PARTY_SLOT_BADGE_SIZE,
+    tile_radius: int = PARTY_TILE_RADIUS,
+) -> None:
+    """Corner-ribbon slot badge: a small flag-shaped tab flush with the
+    tile's top-right corner (sharing the tile's own outer corner radius) with
+    a smooth concave arc cut into its inner (bottom-left-facing) edge — e.g.
+    a rank/slot ribbon on a trading-card tile, not a plain circle badge."""
+    x0, y0, x1, y1 = box
+    badge = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(badge)
+    # Solid tab: only the outer (top-right) corner rounded, matching the
+    # tile's own panel radius so the ribbon's outer edge is flush with it.
+    bd.rounded_rectangle(
+        (0, 0, size - 1, size - 1), radius=tile_radius, fill=bg_color,
+        corners=(False, True, False, False),
+    )
+    # Concave scoop: an ellipse anchored just past the bottom-left corner,
+    # sized to ~0.6x the badge so it cuts a shallow arc from the top edge
+    # down to the right edge — the "ribbon tucked into the corner"
+    # silhouette (a full-size circle here erases nearly the whole tab).
+    scoop_r = size * 0.62
+    bd.ellipse((-scoop_r, size - scoop_r, scoop_r, size + scoop_r), fill=(0, 0, 0, 0))
+    px, py = x1 - size, y0
+    card.paste(badge, (px, py), badge)
+
+    # Center the digit in the remaining solid (upper-right) wedge, not the
+    # badge's own bounding box center (which sits inside the cut-away area).
+    text_cx = px + size * 0.72
+    text_cy = py + size * 0.32
+    bbox = ImageDraw.Draw(card).textbbox((0, 0), text, font=font)
+    ImageDraw.Draw(card).text(
+        (text_cx - (bbox[2] - bbox[0]) / 2 - bbox[0], text_cy - (bbox[3] - bbox[1]) / 2 - bbox[1]),
+        text, font=font, fill=text_color,
+    )
+
+
 def _draw_party_tile(
     card: Image.Image,
     draw: ImageDraw.ImageDraw,
@@ -306,7 +350,7 @@ def _draw_party_tile(
 ) -> None:
     x0, y0, x1, y1 = box
     if slot is None:
-        _draw_panel(draw, box, fill=COLOR_SURFACE, outline=COLOR_MUTED_BORDER, radius=10)
+        _draw_panel(draw, box, fill=COLOR_SURFACE, outline=COLOR_MUTED_BORDER, radius=PARTY_TILE_RADIUS)
         empty_w = (x1 - x0) - 16
         label = _truncate_to_width("Empty", dex_font, empty_w)
         cx = x0 + (x1 - x0) // 2
@@ -321,7 +365,10 @@ def _draw_party_tile(
         return
 
     border = COLOR_GOLD if slot.is_shiny else COLOR_BLURPLE
-    _draw_panel(draw, box, fill=COLOR_SURFACE, outline=border, outline_width=PARTY_TILE_BORDER_WIDTH, radius=10)
+    _draw_panel(
+        draw, box, fill=COLOR_SURFACE, outline=border, outline_width=PARTY_TILE_BORDER_WIDTH,
+        radius=PARTY_TILE_RADIUS,
+    )
 
     pad = 8
     max_w = (x1 - x0) - pad * 2
@@ -353,25 +400,12 @@ def _draw_party_tile(
         (cx - (dex_bbox[2] - dex_bbox[0]) // 2, text_top + 18), dex_label, font=dex_font, fill=COLOR_SUBTEXT
     )
 
-    # Slot number as a small corner badge (top-right) instead of a full
-    # "Slot {n}" text line.
-    badge_r = PARTY_SLOT_BADGE_SIZE // 2
-    badge_cx = x1 - 4 - badge_r
-    badge_cy = y0 + 4 + badge_r
-    draw.ellipse(
-        (badge_cx - badge_r, badge_cy - badge_r, badge_cx + badge_r, badge_cy + badge_r), fill=border
-    )
-    slot_text = str(slot.slot)
-    slot_bbox = draw.textbbox((0, 0), slot_text, font=dex_font)
+    # Slot number as a small corner-ribbon badge (top-right) instead of a
+    # plain circle — flush with the tile's own rounded corner, concave inner
+    # arc, per the mockup reference the user supplied.
     badge_text_color = COLOR_BASE if slot.is_shiny else COLOR_TEXT
-    draw.text(
-        (
-            badge_cx - (slot_bbox[2] - slot_bbox[0]) // 2 - slot_bbox[0],
-            badge_cy - (slot_bbox[3] - slot_bbox[1]) // 2 - slot_bbox[1],
-        ),
-        slot_text,
-        font=dex_font,
-        fill=badge_text_color,
+    _draw_corner_ribbon_badge(
+        card, box, str(slot.slot), dex_font, bg_color=border, text_color=badge_text_color
     )
 
 
