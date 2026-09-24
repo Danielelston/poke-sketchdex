@@ -8,7 +8,6 @@ wallet are shared across every server the bot is in.
 from __future__ import annotations
 
 import logging
-import os
 
 import discord
 from discord import app_commands
@@ -124,17 +123,7 @@ class Collection(commands.Cog):
             )
             return
 
-        files: list[discord.File] = []
-        embeds: list[discord.Embed] = []
-        for mon in mons:
-            embed = discord.Embed(title=f"Slot {mon.slot}: {_display_name(mon)}", color=0x5865F2)
-            if mon.cached_image_path and os.path.exists(mon.cached_image_path):
-                filename = f"slot{mon.slot}.png"
-                files.append(discord.File(mon.cached_image_path, filename=filename))
-                embed.set_image(url=f"attachment://{filename}")
-            embeds.append(embed)
-        embeds[0].set_author(name=f"{target.display_name}'s Active Party ({len(mons)}/{pokebox.MAX_ACTIVE})")
-
+        embeds, files = pokebox.build_party_embeds(target.display_name, mons)
         await interaction.response.send_message(embeds=embeds, files=files)
 
     @app_commands.command(name="box", description="Paginated view of your (or someone's) storage box.")
