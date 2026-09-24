@@ -26,11 +26,14 @@ SPRITES_BASE = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites
 USER_AGENT = "PokeSketchDex-Bot/0.1 (+https://github.com/Danielelston/poke-sketchdex)"
 
 CORNER_EMBLEM_SIZE = 64
-FULL_BLEED_OPACITY = 0.15
+FULL_BLEED_OPACITY = 0.18
 # How far the full-bleed art is upscaled past "just barely covers the canvas" —
 # a purely aesthetic choice so the ball art bleeds off all four edges rather
 # than exactly touching them.
 FULL_BLEED_OVERSCAN = 1.4
+# Flat silhouette fill color for the full-bleed watermark (see _render_tier_assets
+# for why this isn't the raw sprite's own colors).
+FULL_BLEED_SILHOUETTE_COLOR = (255, 255, 255)
 
 # (level threshold, display name, PokeAPI/sprites item slug), ascending.
 #
@@ -100,7 +103,18 @@ def _render_tier_assets(
 ) -> None:
     """Composite both static tier assets from the raw ball PNG. Synchronous —
     run via asyncio.to_thread by the caller, same posture as pokebox.py's
-    _normalize_and_save (Pillow calls block, so keep them off the event loop)."""
+    _normalize_and_save (Pillow calls block, so keep them off the event loop).
+
+    The corner emblem uses the sprite's own painted colors (crisp enough at
+    64px). The full-bleed background does NOT — PokeAPI/sprites' item art is
+    only ~30x30px, so blowing that raw detail up ~30x for a 900px canvas (even
+    at low opacity) just reads as a soft colored blur, not a recognizable ball
+    shape (confirmed by manual visual review of sample renders before merge).
+    Instead, the full-bleed layer uses the sprite's ALPHA MASK ONLY as a flat
+    white silhouette — the mask's edges upscale cleanly via LANCZOS (shape,
+    not fine color detail, survives the scale-up), giving a watermark that
+    actually reads as a Poké Ball outline at low opacity.
+    """
     with Image.open(raw_path) as raw:
         raw = raw.convert("RGBA")
 
@@ -114,13 +128,15 @@ def _render_tier_assets(
         canvas_w, canvas_h = canvas_size
         bg = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
         scale = max(canvas_w / raw.width, canvas_h / raw.height) * FULL_BLEED_OVERSCAN
-        scaled = raw.resize(
-            (max(1, int(raw.width * scale)), max(1, int(raw.height * scale))), Image.Resampling.LANCZOS
-        )
-        faded_alpha = scaled.split()[3].point(lambda a: int(a * FULL_BLEED_OPACITY))
-        scaled.putalpha(faded_alpha)
-        offset = ((canvas_w - scaled.width) // 2, (canvas_h - scaled.height) // 2)
-        bg.alpha_composite(scaled, offset)
+        target_size = (max(1, int(raw.width * scale)), max(1, int(raw.height * scale)))
+        # Upscale the ALPHA MASK (shape), not the raw RGBA (fine color detail),
+        # then flat-fill it — this is what keeps the watermark legible at 30x.
+        alpha_mask = raw.split()[3].resize(target_size, Image.Resampling.LANCZOS)
+        silhouette = Image.new("RGBA", target_size, (*FULL_BLEED_SILHOUETTE_COLOR, 0))
+        faded_alpha = alpha_mask.point(lambda a: int(a * FULL_BLEED_OPACITY))
+        silhouette.putalpha(faded_alpha)
+        offset = ((canvas_w - silhouette.width) // 2, (canvas_h - silhouette.height) // 2)
+        bg.alpha_composite(silhouette, offset)
         bg.save(full_bleed_path, format="PNG")
 
 
