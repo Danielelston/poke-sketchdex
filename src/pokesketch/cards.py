@@ -14,6 +14,8 @@ import io
 
 from PIL import Image, ImageDraw, ImageFont
 
+from . import rank_badges
+
 CARD_WIDTH = 900
 CARD_HEIGHT = 600
 CARD_SIZE = (CARD_WIDTH, CARD_HEIGHT)
@@ -35,11 +37,50 @@ CORNER_EMBLEM_MARGIN = 24
 EXP_BAR_HEIGHT = 24
 EXP_BAR_RADIUS = 8
 
+# Section panels: solid, rounded-rect backdrops drawn fresh on every render
+# (NOT pre-rendered art) behind each content area — header/stats block and
+# the party row — so text and sprites always sit on a readable solid surface
+# regardless of what the full-bleed ball-silhouette watermark looks like
+# underneath. Drawn programmatically rather than baked into the per-tier
+# background art because panel size/position needs to adapt to content (the
+# party panel is simply skipped when there's no active party, and panel
+# width already has to account for the pixel-width-truncated username) —
+# baking fixed-size panels into pre-rendered tier art can't flex for that.
+# Tinted per-tier via rank_badges.accent_color_for_tier() so the card still
+# reads as tier-branded despite the panels themselves being generic shapes.
+PANEL_RADIUS = 20
+PANEL_ALPHA = 235
+PANEL_BASE_COLOR = (24, 24, 32)
+PANEL_ACCENT_BORDER_ALPHA = 160
+PANEL_ACCENT_BORDER_WIDTH = 3
+PANEL_PADDING = 20
+
 HEADER_FONT_SIZE = 42
 # Reserve room on the right for the corner emblem (see render_profile_card)
 # so a long username can never overlap it — pixel-width-aware, not a fixed
 # character count, since DejaVu Bold's glyph widths vary a lot by character.
-HEADER_MAX_WIDTH = CARD_WIDTH - MARGIN - (CORNER_EMBLEM_MARGIN * 2 + 64)
+HEADER_MAX_WIDTH = CARD_WIDTH - MARGIN * 2 - PANEL_PADDING * 2 - (CORNER_EMBLEM_MARGIN * 2 + 64)
+
+
+def _draw_panel(
+    card: Image.Image, box: tuple[int, int, int, int], accent: tuple[int, int, int]
+) -> None:
+    """Draw one solid, rounded-rect section panel (a translucent dark card,
+    not pre-rendered art) at `box`, with a thin accent-colored border tying
+    it to the current rank tier. Alpha-composited so the panel's translucency
+    lets a hint of the full-bleed watermark show through at the edges rather
+    than fully occluding it."""
+    x0, y0, x1, y1 = box
+    panel = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(panel)
+    draw.rounded_rectangle(
+        (0, 0, x1 - x0 - 1, y1 - y0 - 1),
+        radius=PANEL_RADIUS,
+        fill=(*PANEL_BASE_COLOR, PANEL_ALPHA),
+        outline=(*accent, PANEL_ACCENT_BORDER_ALPHA),
+        width=PANEL_ACCENT_BORDER_WIDTH,
+    )
+    card.alpha_composite(panel, (x0, y0))
 
 
 def _truncate_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
@@ -96,15 +137,11 @@ def render_profile_card(
     skipped rather than raising, since sprite availability is outside the
     caller's control (a cold PokeAPI miss shouldn't break the whole card).
     """
+    accent = rank_badges.accent_color_for_tier(rank_tier)
     card = Image.new("RGBA", CARD_SIZE, BG_COLOR)
 
     with Image.open(tier_full_bleed_path) as bg:
         card.alpha_composite(bg.convert("RGBA"))
-
-    with Image.open(tier_corner_emblem_path) as emblem:
-        emblem = emblem.convert("RGBA")
-        pos = (CARD_WIDTH - emblem.width - CORNER_EMBLEM_MARGIN, CORNER_EMBLEM_MARGIN)
-        card.alpha_composite(emblem, pos)
 
     draw = ImageDraw.Draw(card)
     header_font = ImageFont.truetype(FONT_BOLD, HEADER_FONT_SIZE)
@@ -113,26 +150,54 @@ def render_profile_card(
 
     display_username = _truncate_to_width(username, header_font, HEADER_MAX_WIDTH)
 
-    draw.text((MARGIN, MARGIN), display_username, font=header_font, fill=TEXT_COLOR)
-    draw.text((MARGIN, MARGIN + 56), f"Level {level} · {rank_tier}", font=subheader_font, fill=SUBTEXT_COLOR)
+    text_x = MARGIN + PANEL_PADDING
+    text_y = MARGIN + PANEL_PADDING
 
-    bar_y = MARGIN + 100
-    bar_w = CARD_WIDTH - MARGIN * 2
+    bar_y = text_y + 100
+    bar_w = CARD_WIDTH - (MARGIN + PANEL_PADDING) * 2
+    stats_y = bar_y + EXP_BAR_HEIGHT + 44
+    submitted_y = stats_y + 32
+
+    # Header/stats panel: a solid backdrop behind the username, level/rank
+    # line, EXP bar, and stat lines, so that block is always readable
+    # regardless of the watermark underneath (see PANEL_* constants above
+    # for why this is drawn fresh here rather than pre-rendered). Height is
+    # measured from the LAST line's actual rendered bbox (not a hardcoded
+    # constant) so the panel can never clip its own content if line spacing,
+    # font sizes, or content ever change — confirmed by manual visual review
+    # of sample renders before merge: an earlier fixed-height panel clipped
+    # the last "Sketches submitted" stat line by ~15-30px.
+    last_line_bbox = draw.textbbox((text_x, submitted_y), "Sketches submitted: 0", font=stat_font)
+    header_panel_bottom = int(last_line_bbox[3]) + PANEL_PADDING
+    header_panel_box = (MARGIN, MARGIN, CARD_WIDTH - MARGIN, header_panel_bottom)
+    _draw_panel(card, header_panel_box, accent)
+
+    with Image.open(tier_corner_emblem_path) as emblem:
+        emblem = emblem.convert("RGBA")
+        pos = (CARD_WIDTH - emblem.width - CORNER_EMBLEM_MARGIN, CORNER_EMBLEM_MARGIN)
+        card.alpha_composite(emblem, pos)
+
+    draw.text((text_x, text_y), display_username, font=header_font, fill=TEXT_COLOR)
+    draw.text(
+        (text_x, text_y + 56), f"Level {level} · {rank_tier}", font=subheader_font, fill=SUBTEXT_COLOR
+    )
+
     draw.rounded_rectangle(
-        (MARGIN, bar_y, MARGIN + bar_w, bar_y + EXP_BAR_HEIGHT), radius=EXP_BAR_RADIUS, fill=BAR_BG_COLOR
+        (text_x, bar_y, text_x + bar_w, bar_y + EXP_BAR_HEIGHT), radius=EXP_BAR_RADIUS, fill=BAR_BG_COLOR
     )
     frac = 0.0 if exp_needed <= 0 else min(1.0, exp_current / exp_needed)
     filled_w = int(bar_w * frac)
     if filled_w > 0:
-        draw.rectangle((MARGIN, bar_y, MARGIN + filled_w, bar_y + EXP_BAR_HEIGHT), fill=BAR_FILL_COLOR)
+        draw.rectangle((text_x, bar_y, text_x + filled_w, bar_y + EXP_BAR_HEIGHT), fill=BAR_FILL_COLOR)
     draw.text(
-        (MARGIN, bar_y + EXP_BAR_HEIGHT + 8), f"{exp_current} / {exp_needed} EXP", font=stat_font, fill=SUBTEXT_COLOR
+        (text_x, bar_y + EXP_BAR_HEIGHT + 8), f"{exp_current} / {exp_needed} EXP", font=stat_font, fill=SUBTEXT_COLOR
     )
 
-    stats_y = bar_y + EXP_BAR_HEIGHT + 44
     day_word = "day" if streak == 1 else "days"
-    draw.text((MARGIN, stats_y), f"Streak: {streak} {day_word}", font=stat_font, fill=SUBTEXT_COLOR)
-    draw.text((MARGIN, stats_y + 32), f"Sketches submitted: {submission_count}", font=stat_font, fill=SUBTEXT_COLOR)
+    draw.text((text_x, stats_y), f"Streak: {streak} {day_word}", font=stat_font, fill=SUBTEXT_COLOR)
+    draw.text(
+        (text_x, submitted_y), f"Sketches submitted: {submission_count}", font=stat_font, fill=SUBTEXT_COLOR
+    )
 
     slots = party_sprite_paths[:MAX_PARTY_SLOTS]
     thumbnails = []
@@ -143,9 +208,20 @@ def render_profile_card(
             continue
 
     if thumbnails:
-        party_y = CARD_HEIGHT - PARTY_THUMB_SIZE - MARGIN
+        # Party panel: only drawn when there's an active party to show — a
+        # fixed pre-rendered panel couldn't conditionally disappear like this.
+        party_panel_h = PARTY_THUMB_SIZE + PANEL_PADDING * 2
+        party_panel_box = (
+            MARGIN,
+            CARD_HEIGHT - MARGIN - party_panel_h,
+            CARD_WIDTH - MARGIN,
+            CARD_HEIGHT - MARGIN,
+        )
+        _draw_panel(card, party_panel_box, accent)
+
+        party_y = party_panel_box[1] + PANEL_PADDING
         total_w = len(thumbnails) * PARTY_THUMB_SIZE + (len(thumbnails) - 1) * PARTY_THUMB_SPACING
-        start_x = max(MARGIN, (CARD_WIDTH - total_w) // 2)
+        start_x = max(MARGIN + PANEL_PADDING, (CARD_WIDTH - total_w) // 2)
         for i, thumb in enumerate(thumbnails):
             x = start_x + i * (PARTY_THUMB_SIZE + PARTY_THUMB_SPACING)
             card.alpha_composite(thumb, (x, party_y))

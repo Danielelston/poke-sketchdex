@@ -35,7 +35,7 @@ FULL_BLEED_OVERSCAN = 1.4
 # for why this isn't the raw sprite's own colors).
 FULL_BLEED_SILHOUETTE_COLOR = (255, 255, 255)
 
-# (level threshold, display name, PokeAPI/sprites item slug), ascending.
+# (level threshold, display name, PokeAPI/sprites item slug, accent RGB), ascending.
 #
 # Thresholds are tuned against leveling.exp_to_reach()'s quadratic curve
 # (25 * (L-1) * L), not chosen arbitrarily. For a reasonably active player
@@ -46,13 +46,19 @@ FULL_BLEED_SILHOUETTE_COLOR = (255, 255, 255)
 # ~2+ years at that pace), matching a long-lived Discord community rather
 # than a fast mobile-game curve — Master Ball as the rank badge should feel
 # as rare as it does in the games.
-RANK_TIERS: list[tuple[int, str, str]] = [
-    (1, "Poké Ball", "poke-ball"),
-    (5, "Great Ball", "great-ball"),
-    (12, "Ultra Ball", "ultra-ball"),
-    (20, "Premier Ball", "premier-ball"),
-    (30, "Luxury Ball", "luxury-ball"),
-    (45, "Master Ball", "master-ball"),
+#
+# Accent color is each ball's real dominant color (not derived from the tiny
+# sprite pixels, which are too small/noisy to sample reliably) — used by
+# cards.py to tint the programmatically-drawn section panels per tier, so
+# the card still feels tier-branded even though the panels themselves are
+# generic shapes, not pre-rendered art.
+RANK_TIERS: list[tuple[int, str, str, tuple[int, int, int]]] = [
+    (1, "Poké Ball", "poke-ball", (224, 60, 55)),
+    (5, "Great Ball", "great-ball", (52, 120, 199)),
+    (12, "Ultra Ball", "ultra-ball", (232, 178, 43)),
+    (20, "Premier Ball", "premier-ball", (219, 219, 219)),
+    (30, "Luxury Ball", "luxury-ball", (212, 175, 55)),
+    (45, "Master Ball", "master-ball", (168, 92, 204)),
 ]
 
 
@@ -60,7 +66,7 @@ def rank_for_level(level: int) -> str:
     """Highest tier whose threshold level is <= `level` (levels below the
     first threshold, including non-positive levels, get the base tier)."""
     name = RANK_TIERS[0][1]
-    for threshold, tier_name, _slug in RANK_TIERS:
+    for threshold, tier_name, _slug, _accent in RANK_TIERS:
         if level >= threshold:
             name = tier_name
         else:
@@ -68,8 +74,18 @@ def rank_for_level(level: int) -> str:
     return name
 
 
+def accent_color_for_tier(tier_name: str) -> tuple[int, int, int]:
+    """Each tier's real ball color, for tinting cards.py's programmatically-
+    drawn section panels (header/stats/party) so the card reads as
+    tier-branded without needing pre-rendered per-tier panel art."""
+    for _threshold, name, _slug, accent in RANK_TIERS:
+        if name == tier_name:
+            return accent
+    raise ValueError(f"Unknown rank tier: {tier_name!r}")
+
+
 def _slug_for_tier(tier_name: str) -> str:
-    for _threshold, name, slug in RANK_TIERS:
+    for _threshold, name, slug, _accent in RANK_TIERS:
         if name == tier_name:
             return slug
     raise ValueError(f"Unknown rank tier: {tier_name!r}")
