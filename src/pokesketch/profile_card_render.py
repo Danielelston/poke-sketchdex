@@ -303,6 +303,52 @@ def _draw_stat_tile(
         draw.text((tx, y0 + pad + 52), subtext, font=sub_font, fill=COLOR_SUBTEXT)
 
 
+def _draw_streak_tile(
+    card: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    global_streak: int,
+    global_streak_best: int,
+    server_streak: int | None,
+    server_streak_best: int | None,
+    label_font: ImageFont.FreeTypeFont,
+    value_font: ImageFont.FreeTypeFont,
+    sub_font: ImageFont.FreeTypeFont,
+) -> None:
+    """Streak tile, two internal sub-columns instead of _draw_stat_tile's
+    single value/subtext stack: left = Global ("G: {n}" / "best: {best}"),
+    right = This Server (same shape, or an em-dash placeholder when
+    `server_streak` is None i.e. no per-server data for this guild) — kept
+    as its own draw function rather than overloading `_draw_stat_tile`,
+    since no other tile needs a two-column split."""
+    x0, y0, x1, y1 = box
+    _draw_panel(draw, box, fill=COLOR_SURFACE, outline=COLOR_MUTED_BORDER)
+    pad = 12
+    draw.text((x0 + pad, y0 + pad), "STREAK", font=label_font, fill=COLOR_SUBTEXT)
+
+    col_w = ((x1 - x0) - pad * 2) // 2
+    left_x = x0 + pad
+    right_x = x0 + pad + col_w
+
+    value_y = y0 + pad + 20
+    sub_y = y0 + pad + 52
+
+    def draw_column(cx: int, prefix: str, streak: int | None, best: int | None) -> None:
+        max_w = col_w - 6  # small inter-column gutter so text doesn't touch the divider
+        if streak is None:
+            draw.text((cx, value_y), "—", font=value_font, fill=COLOR_TEXT)
+            sub = _truncate_to_width("No data", sub_font, max_w)
+            draw.text((cx, sub_y), sub, font=sub_font, fill=COLOR_SUBTEXT)
+            return
+        value_text = _truncate_to_width(f"{prefix}: {streak}", value_font, max_w)
+        draw.text((cx, value_y), value_text, font=value_font, fill=COLOR_TEXT)
+        sub_text = _truncate_to_width(f"best: {best}", sub_font, max_w)
+        draw.text((cx, sub_y), sub_text, font=sub_font, fill=COLOR_SUBTEXT)
+
+    draw_column(left_x, "G", global_streak, global_streak_best)
+    draw_column(right_x, "S", server_streak, server_streak_best)
+
+
 def _draw_corner_ribbon_badge(
     card: Image.Image,
     box: tuple[int, int, int, int],
@@ -490,21 +536,15 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
         )
 
     # Combined Streak tile (frees up the third slot from the dropped
-    # Accuracy tile): global streak always shown, per-server streak on a
-    # second line (or the established "no per-server data" convention when
-    # data.server is None, same as the This Server tile above). Uses a
-    # compact "G:14 (best 31)" format (not "Global: 14 (best 31)") since the
-    # narrower mobile-layout tile can't fit the verbose form at the stat
-    # value font size without truncating.
-    streak_subtext = (
-        f"S: {data.server.streak} (best {data.server.streak_best})"
-        if data.server is not None
-        else "No per-server data yet"
-    )
-    _draw_stat_tile(
-        card, draw, tile_box(0, 1), "Streak",
-        f"G: {data.global_streak} (best {data.global_streak_best})",
-        streak_subtext,
+    # Accuracy tile): two internal sub-columns (Global left, This Server
+    # right), each with its own "G: n" / "best: n" pair — see
+    # _draw_streak_tile's docstring for why this tile needs its own draw
+    # function instead of reusing _draw_stat_tile's single-column layout.
+    _draw_streak_tile(
+        card, draw, tile_box(0, 1),
+        data.global_streak, data.global_streak_best,
+        data.server.streak if data.server is not None else None,
+        data.server.streak_best if data.server is not None else None,
         stat_label_font, stat_value_font, stat_sub_font,
     )
 
