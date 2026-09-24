@@ -1719,6 +1719,158 @@ async def main() -> None:
     assert "/gym start" in admin_text2 and "/gym end" in admin_text2, admin_text2
     print("gym help OK: /gym start /gym end documented in /help-admin, /gym status /gym badges in /help")
 
+    # --- Daily Winner Spotlight ---------------------------------------
+    from datetime import timedelta as _timedelta
+
+    from pokesketch.daily_spotlight import post_daily_spotlight_for_guild
+
+    class _SpotlightChannel:
+        def __init__(self, channel_id: int):
+            self.id = channel_id
+            self.sent: list[dict] = []
+
+        async def send(self, *args, **kwargs):
+            self.sent.append(kwargs)
+            return _FakeSentMessage(80000 + len(self.sent), "https://example.invalid/spotlight.png")
+
+    class _SpotlightClient:
+        def __init__(self, channels: dict[int, object]):
+            self._channels = channels
+
+        def get_channel(self, cid):
+            return self._channels.get(cid)
+
+        async def fetch_channel(self, cid):
+            return self._channels[cid]
+
+    sl_gid = 400
+    sl_channel_id = 40001
+    sl_channel = _SpotlightChannel(sl_channel_id)
+    sl_client = _SpotlightClient({sl_channel_id: sl_channel})
+    yesterday = today - _timedelta(days=1)
+    two_days_ago = today - _timedelta(days=2)
+
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=sl_gid, channel_id=sl_channel_id, timezone="UTC"))
+        await s.commit()
+
+        daily_yday = db.DailyPokemon(
+            guild_id=sl_gid, local_date=yesterday, dex_no=25, name="pikachu", is_shiny=False
+        )
+        daily_2days = db.DailyPokemon(
+            guild_id=sl_gid, local_date=two_days_ago, dex_no=1, name="bulbasaur", is_shiny=False
+        )
+        s.add_all([daily_yday, daily_2days])
+        await s.flush()
+
+        sub_low = db.Submission(
+            guild_id=sl_gid, user_id=111, daily_id=daily_yday.id,
+            image_url="https://example.invalid/low.png",
+        )
+        sub_high = db.Submission(
+            guild_id=sl_gid, user_id=222, daily_id=daily_yday.id,
+            image_url="https://example.invalid/high.png",
+        )
+        s.add_all([sub_low, sub_high])
+        await s.flush()
+
+        s.add(db.Upvote(submission_id=sub_low.id, voter_id=901))
+        s.add(db.Upvote(submission_id=sub_high.id, voter_id=901))
+        s.add(db.Upvote(submission_id=sub_high.id, voter_id=902))
+        s.add(db.Upvote(submission_id=sub_high.id, voter_id=903))
+        await s.commit()
+
+    posted = await post_daily_spotlight_for_guild(sl_client, sl_gid, yesterday)
+    assert posted is True, posted
+    assert len(sl_channel.sent) == 1, sl_channel.sent
+    embed = sl_channel.sent[0]["embed"]
+    assert "222" in embed.description or True  # mention format check below
+    assert "<@222>" in embed.description and "<@111>" not in embed.description, embed.description
+    assert "3 upvotes" in embed.description, embed.description
+
+    async with db.session() as s:
+        events = (
+            await s.execute(
+                select(db.ExpEvent).where(
+                    db.ExpEvent.guild_id == sl_gid, db.ExpEvent.type == "daily_winner"
+                )
+            )
+        ).scalars().all()
+    assert len(events) == 1, events
+    assert events[0].user_id == 222, events[0].user_id
+    assert events[0].amount == leveling.EXP_DAILY_WINNER, events[0].amount
+    print("daily spotlight OK: single winner picked by upvote count, EXP_DAILY_WINNER awarded once")
+
+    # Re-running the same day must not double-post or double-award (idempotency).
+    sl_channel.sent.clear()
+    posted_again = await post_daily_spotlight_for_guild(sl_client, sl_gid, yesterday)
+    assert posted_again is False, posted_again
+    assert len(sl_channel.sent) == 0, sl_channel.sent
+    async with db.session() as s:
+        events_after = (
+            await s.execute(
+                select(db.ExpEvent).where(
+                    db.ExpEvent.guild_id == sl_gid, db.ExpEvent.type == "daily_winner"
+                )
+            )
+        ).scalars().all()
+    assert len(events_after) == 1, events_after
+    print("daily spotlight OK: idempotency guard prevents a second post/EXP-award for the same day")
+
+    # Tie case: a separate guild, two submissions tied for the top upvote count.
+    tie_gid = 401
+    tie_channel_id = 40101
+    tie_channel = _SpotlightChannel(tie_channel_id)
+    tie_client = _SpotlightClient({tie_channel_id: tie_channel})
+
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=tie_gid, channel_id=tie_channel_id, timezone="UTC"))
+        await s.commit()
+        daily_tie = db.DailyPokemon(
+            guild_id=tie_gid, local_date=yesterday, dex_no=4, name="charmander", is_shiny=True
+        )
+        s.add(daily_tie)
+        await s.flush()
+        sub_a = db.Submission(guild_id=tie_gid, user_id=301, daily_id=daily_tie.id, image_url="https://example.invalid/a.png")
+        sub_b = db.Submission(guild_id=tie_gid, user_id=302, daily_id=daily_tie.id, image_url="https://example.invalid/b.png")
+        s.add_all([sub_a, sub_b])
+        await s.flush()
+        s.add(db.Upvote(submission_id=sub_a.id, voter_id=901))
+        s.add(db.Upvote(submission_id=sub_b.id, voter_id=901))
+        await s.commit()
+
+    tie_posted = await post_daily_spotlight_for_guild(tie_client, tie_gid, yesterday)
+    assert tie_posted is True, tie_posted
+    tie_embed = tie_channel.sent[0]["embed"]
+    assert "<@301>" in tie_embed.description and "<@302>" in tie_embed.description, tie_embed.description
+    async with db.session() as s:
+        tie_events = (
+            await s.execute(
+                select(db.ExpEvent).where(
+                    db.ExpEvent.guild_id == tie_gid, db.ExpEvent.type == "daily_winner"
+                )
+            )
+        ).scalars().all()
+    assert len(tie_events) == 2, tie_events
+    assert {e.user_id for e in tie_events} == {301, 302}, tie_events
+    assert all(e.amount == leveling.EXP_DAILY_WINNER for e in tie_events), tie_events
+    print("daily spotlight OK: tie credits both artists in one post, each gets full EXP (not split)")
+
+    # No-submissions case: a guild with a daily row for yesterday but zero
+    # submissions must no-op cleanly (no post, no crash).
+    empty_gid = 402
+    empty_channel_id = 40201
+    empty_channel = _SpotlightChannel(empty_channel_id)
+    empty_client = _SpotlightClient({empty_channel_id: empty_channel})
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=empty_gid, channel_id=empty_channel_id, timezone="UTC"))
+        s.add(db.DailyPokemon(guild_id=empty_gid, local_date=yesterday, dex_no=7, name="squirtle", is_shiny=False))
+        await s.commit()
+    empty_posted = await post_daily_spotlight_for_guild(empty_client, empty_gid, yesterday)
+    assert empty_posted is False, empty_posted
+    assert len(empty_channel.sent) == 0, empty_channel.sent
+    print("daily spotlight OK: no-submissions day posts nothing and does not crash")
+
     print("ALL SMOKE TESTS PASSED")
 
 
