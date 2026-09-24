@@ -211,46 +211,69 @@ def _draw_circular_avatar(
     see PartyCardSlot's sprite_path / _draw_party_tile). Falls back to a
     plain filled circle with the target's first initial when no avatar was
     fetched/available, rather than leaving a blank gap, same posture as the
-    party grid's "Empty" placeholder tiles."""
-    x0, y0 = center_x - size // 2, center_y - size // 2
+    party grid's "Empty" placeholder tiles.
 
-    mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+    The border ring sits OUTSIDE the avatar image, not overlapping it: the
+    avatar disk is sized to `size - 2*ring_width` so its edge lands exactly
+    at the ring's inner edge, and the ring itself is drawn at the full
+    `size` bounding box — no bleed past the ring, no gap between them.
+    Everything is supersampled 4x then downscaled for anti-aliased edges
+    (a straight `ImageDraw.ellipse` at avatar-badge sizes is visibly
+    jagged/pixelated, as flagged against a reference screenshot)."""
+    x0, y0 = center_x - size // 2, center_y - size // 2
+    ring_w = HEADER_AVATAR_RING_WIDTH
+    ss = 4  # supersample factor for smooth anti-aliased circles
+    ss_size = size * ss
+    avatar_diameter = size - 2 * ring_w
+    ss_avatar_diameter = avatar_diameter * ss
+    avatar_offset = ring_w * ss  # avatar sits inset by exactly one ring width
+
+    composite = Image.new("RGBA", (ss_size, ss_size), (0, 0, 0, 0))
+
+    avatar_mask = Image.new("L", (ss_avatar_diameter, ss_avatar_diameter), 0)
+    ImageDraw.Draw(avatar_mask).ellipse((0, 0, ss_avatar_diameter - 1, ss_avatar_diameter - 1), fill=255)
 
     if avatar_path:
         try:
             with Image.open(avatar_path) as avatar_img:
-                avatar_img = avatar_img.convert("RGBA").resize((size, size), Image.Resampling.LANCZOS)
-                card.paste(avatar_img, (x0, y0), mask)
+                avatar_img = avatar_img.convert("RGBA").resize(
+                    (ss_avatar_diameter, ss_avatar_diameter), Image.Resampling.LANCZOS
+                )
+                composite.paste(avatar_img, (avatar_offset, avatar_offset), avatar_mask)
         except Exception:
             log.warning("Failed to composite avatar from %r", avatar_path, exc_info=True)
             avatar_path = None  # fall through to the placeholder below
 
     if not avatar_path:
-        circle = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        circle = Image.new("RGBA", (ss_avatar_diameter, ss_avatar_diameter), (0, 0, 0, 0))
         cd = ImageDraw.Draw(circle)
-        cd.ellipse((0, 0, size - 1, size - 1), fill=COLOR_MUTED_BORDER)
+        cd.ellipse((0, 0, ss_avatar_diameter - 1, ss_avatar_diameter - 1), fill=COLOR_MUTED_BORDER)
         letter = (fallback_letter or "?")[0].upper()
-        letter_font = ImageFont.truetype(FONT_BOLD, int(size * 0.45))
+        letter_font = ImageFont.truetype(FONT_BOLD, int(ss_avatar_diameter * 0.45))
         bbox = cd.textbbox((0, 0), letter, font=letter_font)
         cd.text(
-            (size / 2 - (bbox[2] - bbox[0]) / 2 - bbox[0], size / 2 - (bbox[3] - bbox[1]) / 2 - bbox[1]),
+            (
+                ss_avatar_diameter / 2 - (bbox[2] - bbox[0]) / 2 - bbox[0],
+                ss_avatar_diameter / 2 - (bbox[3] - bbox[1]) / 2 - bbox[1],
+            ),
             letter, font=letter_font, fill=COLOR_TEXT,
         )
-        card.paste(circle, (x0, y0), circle)
+        composite.paste(circle, (avatar_offset, avatar_offset), circle)
 
-    # Ring so the avatar reads as a distinct element against the header
-    # panel's surface color, same border-accent language the party tiles
-    # use (gold/blurple outline). Inset scales with the ring width so a
-    # thicker ring doesn't eat further into the avatar image itself.
-    ring = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    inset = HEADER_AVATAR_RING_WIDTH // 2
-    ImageDraw.Draw(ring).ellipse(
-        (inset, inset, size - 1 - inset, size - 1 - inset),
+    # Ring drawn at the FULL outer bounding box (not inset) so it sits
+    # outside the avatar disk rather than overlapping its edge pixels —
+    # its inner edge lands exactly on the avatar's own edge (both derived
+    # from the same ring_w), so there's no bleed and no visible gap.
+    ss_ring_w = ring_w * ss
+    ring_inset = ss_ring_w // 2
+    ImageDraw.Draw(composite).ellipse(
+        (ring_inset, ring_inset, ss_size - 1 - ring_inset, ss_size - 1 - ring_inset),
         outline=border_color,
-        width=HEADER_AVATAR_RING_WIDTH,
+        width=ss_ring_w,
     )
-    card.paste(ring, (x0, y0), ring)
+
+    composite = composite.resize((size, size), Image.Resampling.LANCZOS)
+    card.paste(composite, (x0, y0), composite)
 
 
 def _draw_level_badge(
