@@ -65,8 +65,9 @@ PANEL_RADIUS = 14
 HEADER_HEIGHT = 90
 HEADER_FONT_SIZE = 30
 HEADER_SUB_FONT_SIZE = 20
-HEADER_AVATAR_SIZE = 64  # circular, right-aligned within the header panel
-HEADER_AVATAR_MARGIN = 16  # gap from the header panel's right/top edge
+HEADER_AVATAR_SIZE = 64  # circular, left-aligned within the header panel
+HEADER_AVATAR_MARGIN = 16  # gap from the header panel's left/top edge
+HEADER_USERNAME_SUB_GAP = 46  # vertical gap from username baseline to the level badge/chip sub-line
 
 # --- Header title-badge chip (MUI-chip-style pill) ----------------------
 CHIP_PAD_X = 11
@@ -243,6 +244,30 @@ def _draw_circular_avatar(
     ring = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     ImageDraw.Draw(ring).ellipse((1, 1, size - 2, size - 2), outline=border_color, width=2)
     card.paste(ring, (x0, y0), ring)
+
+
+def _draw_level_badge(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+) -> int:
+    """Draw a small rounded-rect "Lv. {N}" badge — visually distinct from
+    the pill-shaped title-badge chip (_draw_chip): a modest corner radius
+    (not a full pill), a dark fill + subtle border, bold text. Matches the
+    user-supplied reference image. Returns the pixel width consumed."""
+    pad_x, pad_y, radius = 12, 6, 8
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    badge_w = int(text_w + pad_x * 2)
+    badge_h = int(text_h + pad_y * 2)
+    draw.rounded_rectangle(
+        (x, y, x + badge_w, y + badge_h), radius=radius, fill=COLOR_BASE, outline=COLOR_MUTED_BORDER, width=1
+    )
+    draw.text((x + pad_x - bbox[0], y + pad_y - bbox[1]), text, font=font, fill=COLOR_TEXT)
+    return badge_w
 
 
 def _draw_chip(
@@ -536,34 +561,36 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
     header_box = (MARGIN, MARGIN, CARD_WIDTH - MARGIN, MARGIN + HEADER_HEIGHT)
     _draw_panel(draw, header_box, fill=COLOR_SURFACE, outline=COLOR_MUTED_BORDER)
 
-    # Avatar, right-aligned within the header panel — reserves horizontal
-    # room from the username/title text so the two never overlap.
+    # Avatar, LEFT-aligned within the header panel — username/level/title
+    # text is laid out to its right instead of stopping short of a
+    # right-aligned avatar.
     avatar_border = (
         _gradient_from_accent(data.accent_color)[0] if data.accent_color is not None else COLOR_BLURPLE
     )
-    avatar_cx = CARD_WIDTH - MARGIN - HEADER_AVATAR_MARGIN - HEADER_AVATAR_SIZE // 2
-    avatar_cy = MARGIN + HEADER_AVATAR_MARGIN + HEADER_AVATAR_SIZE // 2
+    avatar_cx = MARGIN + HEADER_AVATAR_MARGIN + HEADER_AVATAR_SIZE // 2
+    avatar_cy = MARGIN + HEADER_HEIGHT // 2
     _draw_circular_avatar(
         card, avatar_cx, avatar_cy, HEADER_AVATAR_SIZE, data.avatar_path, data.username, avatar_border
     )
     draw = ImageDraw.Draw(card)  # re-bind after paste() mutated the underlying image
 
-    tx = MARGIN + 16
+    tx = avatar_cx + HEADER_AVATAR_SIZE // 2 + 16
     ty = MARGIN + 14
-    text_right_limit = avatar_cx - HEADER_AVATAR_SIZE // 2 - 16  # stop short of the avatar
+    text_right_limit = CARD_WIDTH - MARGIN - 16
     username = _truncate_to_width(data.username, header_font, text_right_limit - tx)
     draw.text((tx, ty), username, font=header_font, fill=COLOR_TEXT)
 
-    # Sub-line: "Level {N} · {title_badge}" (title_badge rendered as a
-    # chip, not plain inline text).
-    sub_y = ty + 38
-    level_text = f"Level {data.level} · "
-    draw.text((tx, sub_y), level_text, font=sub_font, fill=COLOR_SUBTEXT)
-    chip_x = tx + int(sub_font.getlength(level_text))
+    # Sub-line: "[Lv. {N}] [chip: {title_badge}]" — level now its own small
+    # rounded badge (not plain "Level {N} ·" text) with extra vertical
+    # margin under the username, per the user-supplied reference image.
+    sub_y = ty + HEADER_USERNAME_SUB_GAP
+    level_text = f"Lv. {data.level}"
+    level_badge_w = _draw_level_badge(draw, tx, sub_y, level_text, sub_font)
+    chip_x = tx + level_badge_w + 8
     chip_right_limit = text_right_limit
     chip_max_text_w = max(0, (chip_right_limit - chip_x) - CHIP_PAD_X * 2)
     badge_text = _truncate_to_width(data.title_badge, sub_font, chip_max_text_w)
-    _draw_chip(draw, chip_x, sub_y - CHIP_PAD_Y, badge_text, sub_font, COLOR_BLURPLE, COLOR_TEXT)
+    _draw_chip(draw, chip_x, sub_y, badge_text, sub_font, COLOR_BLURPLE, COLOR_TEXT)
 
     # --- EXP bar -----------------------------------------------------
     exp_y = MARGIN + HEADER_HEIGHT + EXP_GAP_ABOVE
