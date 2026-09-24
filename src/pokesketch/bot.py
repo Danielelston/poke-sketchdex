@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
@@ -15,6 +15,7 @@ from sqlalchemy import select
 from . import db, gym, pokebox, weeklyvote
 from .config import Config
 from .daily import post_daily_for_guild, post_wild_encounter_for_guild
+from .daily_spotlight import post_daily_spotlight_for_guild
 from .default_events import seed_default_events
 from .pokeapi import PokeApiClient
 
@@ -31,6 +32,7 @@ INITIAL_EXTENSIONS = [
 
 WEEKLY_POKEBALL_JOB_ID = "weekly-pokeball-grant"
 GYM_EXPIRY_JOB_ID = "gym-expiry-check"
+DAILY_SPOTLIGHT_JOB_ID = "daily-winner-spotlight"
 
 
 class PokeSketchDexBot(commands.Bot):
@@ -59,6 +61,7 @@ class PokeSketchDexBot(commands.Bot):
         await self._schedule_all_guilds()
         self._schedule_weekly_pokeball_grant()
         self._schedule_gym_expiry_check()
+        self._schedule_daily_spotlight()
         self.scheduler.start()
 
     async def _sync_all_joined_guilds(self) -> None:
@@ -233,6 +236,40 @@ class PokeSketchDexBot(commands.Bot):
                 log.info("Gym expiry check: %d event(s) expired.", len(expired))
         except Exception:  # noqa: BLE001 - never let a job kill the scheduler
             log.exception("Gym expiry check job failed")
+
+    def _schedule_daily_spotlight(self) -> None:
+        """Global (not per-guild) daily tick that posts each guild's previous-
+        day top-upvoted submission(s) (computed in that guild's own local
+        timezone) and awards EXP_DAILY_WINNER. A few minutes before the
+        gym-expiry check, at a fixed global UTC time rather than per-guild
+        post_time — per-guild-timezone scheduling would need a separate job
+        per guild's own morning, which is more complexity than v1 needs; see
+        the Daily Winner Spotlight design doc for why a single global tick
+        (with "yesterday" computed per guild inside the job body) is the
+        accepted v1 simplification."""
+        self.scheduler.add_job(
+            self._run_daily_spotlight_job,
+            CronTrigger(hour=0, minute=5, timezone=ZoneInfo("UTC")),
+            id=DAILY_SPOTLIGHT_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        log.info("Scheduled daily winner spotlight (daily 00:05 UTC).")
+
+    async def _run_daily_spotlight_job(self) -> None:
+        async with db.session() as s:
+            cfgs = (await s.execute(select(db.GuildConfig))).scalars().all()
+        for cfg in cfgs:
+            try:
+                tzinfo = ZoneInfo(cfg.timezone)
+            except KeyError:
+                log.warning("Guild %s: bad timezone %s; skipping spotlight.", cfg.guild_id, cfg.timezone)
+                continue
+            local_date = datetime.now(tzinfo).date() - timedelta(days=1)
+            try:
+                await post_daily_spotlight_for_guild(self, cfg.guild_id, local_date)
+            except Exception:  # noqa: BLE001 - never let a job kill the scheduler
+                log.exception("Daily spotlight job failed for guild %s", cfg.guild_id)
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, getattr(self.user, "id", "?"))
