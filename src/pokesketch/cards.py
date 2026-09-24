@@ -35,9 +35,32 @@ CORNER_EMBLEM_MARGIN = 24
 EXP_BAR_HEIGHT = 24
 EXP_BAR_RADIUS = 8
 
-# Truncate absurdly long display names so the header never overruns the
-# canvas — not a hard Discord username-length limit, just a rendering guard.
-USERNAME_MAX_DISPLAY_LEN = 32
+HEADER_FONT_SIZE = 42
+# Reserve room on the right for the corner emblem (see render_profile_card)
+# so a long username can never overlap it — pixel-width-aware, not a fixed
+# character count, since DejaVu Bold's glyph widths vary a lot by character.
+HEADER_MAX_WIDTH = CARD_WIDTH - MARGIN - (CORNER_EMBLEM_MARGIN * 2 + 64)
+
+
+def _truncate_to_width(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
+    """Truncate `text` with a trailing ellipsis so its rendered width (via this
+    exact font) fits within `max_width` — measures real glyph widths rather
+    than assuming a fixed character-count budget, since bold display fonts
+    vary a lot in per-character width and a char-count guard alone can still
+    overrun the canvas (confirmed by manual visual review of sample renders
+    before merge: a 32-char username at 42pt bold ran past the canvas edge
+    and collided with the corner emblem)."""
+    if font.getlength(text) <= max_width:
+        return text
+    ellipsis = "…"
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if font.getlength(text[:mid] + ellipsis) <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + ellipsis if lo > 0 else ellipsis
 
 
 def _load_party_thumbnail(path: str) -> Image.Image:
@@ -84,14 +107,11 @@ def render_profile_card(
         card.alpha_composite(emblem, pos)
 
     draw = ImageDraw.Draw(card)
-    display_username = (
-        username if len(username) <= USERNAME_MAX_DISPLAY_LEN
-        else username[: USERNAME_MAX_DISPLAY_LEN - 1] + "…"
-    )
-
-    header_font = ImageFont.truetype(FONT_BOLD, 42)
+    header_font = ImageFont.truetype(FONT_BOLD, HEADER_FONT_SIZE)
     subheader_font = ImageFont.truetype(FONT_BOLD, 26)
     stat_font = ImageFont.truetype(FONT_REGULAR, 24)
+
+    display_username = _truncate_to_width(username, header_font, HEADER_MAX_WIDTH)
 
     draw.text((MARGIN, MARGIN), display_username, font=header_font, fill=TEXT_COLOR)
     draw.text((MARGIN, MARGIN + 56), f"Level {level} · {rank_tier}", font=subheader_font, fill=SUBTEXT_COLOR)
