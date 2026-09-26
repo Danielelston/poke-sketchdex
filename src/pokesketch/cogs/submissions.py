@@ -306,6 +306,17 @@ class Submissions(commands.Cog):
         global_user = await _get_or_create_global_user(s, uid)
         Submissions._update_global_streak(global_user, submit_date)
         await Submissions._update_guild_stats(s, gid, submit_date)
+
+        # Party mon EXP: flat MON_EXP_SUBMIT to every active party mon of the
+        # submission's own owner (never a split, identical for daily and
+        # wild-encounter submissions). Failure-isolated so a leveling bug can
+        # never break the submission or the player EXP already awarded above.
+        try:
+            mons = await pokebox.active_party_mons(s, uid)
+            await pokebox.award_mon_exp_to_party(s, mons, leveling.MON_EXP_SUBMIT)
+        except Exception:
+            log.exception("mon-EXP: submission grant failed for user_id=%s", uid)
+
         return base_exp + bonus
 
     @staticmethod
@@ -392,6 +403,9 @@ class Submissions(commands.Cog):
                 gym_results.append(await self._maybe_award_upvote_received_exp(s, sub))
                 gym_results.append(await self._maybe_award_upvote_given_exp(s, sub.guild_id, payload.user_id))
             elif not added and existing is not None:
+                # Mon EXP is append-only and never deducted, matching player
+                # EXP — removing an upvote deletes the Upvote row but grants
+                # no mon-EXP change, intentionally.
                 await s.delete(existing)
             await s.commit()
 
@@ -415,6 +429,20 @@ class Submissions(commands.Cog):
         ).scalar_one()
         if today_total < leveling.EXP_UPVOTE_RECEIVED_DAILY_CAP:
             await _award_exp(s, sub.guild_id, sub.user_id, "upvote_received", leveling.EXP_PER_UPVOTE_RECEIVED)
+
+        # Party mon EXP: MON_EXP_UPVOTE to the one mon caught from this
+        # sketch (active or boxed), a no-op if none was ever caught. `sub`
+        # is always a daily db.Submission here — upvote tracking doesn't
+        # exist for wild-encounter submissions — so wild=False always.
+        try:
+            mon = await pokebox.mon_for_submission(s, sub.id, wild=False)
+            if mon is not None:
+                await pokebox.award_mon_exp_to_party(s, [mon], leveling.MON_EXP_UPVOTE)
+        except Exception:
+            log.exception(
+                "mon-EXP: upvote grant failed for user_id=%s submission_id=%s", sub.user_id, sub.id
+            )
+
         return await gym.record_contribution(s, sub.guild_id, sub.user_id, gym.KIND_UPVOTE_RECEIVED)
 
     @staticmethod
