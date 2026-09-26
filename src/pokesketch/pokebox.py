@@ -632,3 +632,26 @@ async def mon_for_submission(s, submission_id: int, *, wild: bool) -> CaughtMon 
     return (
         await s.execute(select(CaughtMon).where(column == submission_id))
     ).scalar_one_or_none()
+
+
+async def award_mon_exp_to_party(s, mons: list[CaughtMon], amount: int) -> None:
+    """Award `amount` mon EXP to each mon in `mons` via `award_mon_exp`.
+
+    Shared by all three mon-EXP trigger sites (own submission, upvote
+    received, kudos received) so the per-mon isolation and logging live in
+    one place. Each mon's grant is wrapped individually: a bug awarding one
+    mon must never stop the rest, or the submission/upvote/kudos row and the
+    player's own EXP that rides alongside it. Failures are logged with the
+    owning user's ID and the mon's ID (visible via `journalctl -u
+    pokesketch`) and swallowed — callers get no exception and no return
+    value to check. An empty `mons` list is a no-op: nothing awarded,
+    nothing logged.
+    """
+    today = datetime.now(UTC).date()
+    for mon in mons:
+        try:
+            await award_mon_exp(s, mon, amount, today=today)
+        except Exception:
+            log.exception(
+                "mon-EXP award failed for user_id=%s mon_id=%s", mon.user_id, mon.id
+            )
