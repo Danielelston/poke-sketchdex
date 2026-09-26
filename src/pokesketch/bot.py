@@ -18,6 +18,7 @@ from .daily import post_daily_for_guild, post_wild_encounter_for_guild
 from .daily_spotlight import post_daily_spotlight_for_guild
 from .default_events import seed_default_events
 from .pokeapi import PokeApiClient
+from .ui import FormsButtonView
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +55,8 @@ class PokeSketchDexBot(commands.Bot):
             await self.load_extension(ext)
             log.info("Loaded extension %s", ext)
 
+        self._register_persistent_views()
+
         # Slash commands are synced per-guild once we're actually connected
         # and self.guilds is populated — see on_ready / _sync_all_joined_guilds.
         # setup_hook runs before the gateway connects, so self.guilds is
@@ -64,6 +67,13 @@ class PokeSketchDexBot(commands.Bot):
         self._schedule_gym_expiry_check()
         self._schedule_daily_spotlight()
         self.scheduler.start()
+
+    def _register_persistent_views(self) -> None:
+        """Register every persistent view exactly once, before the gateway
+        needs to route any interaction to it — see FormsButtonView's
+        docstring for why this must happen in setup_hook, not per-message.
+        """
+        self.add_view(FormsButtonView())
 
     async def _sync_all_joined_guilds(self) -> None:
         """Sync slash commands guild-scoped only, to every guild we're in.
