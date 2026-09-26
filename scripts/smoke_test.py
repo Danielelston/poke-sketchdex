@@ -67,6 +67,22 @@ async def main() -> None:
     assert lvl == 2 and into == 25 and need == 100, (lvl, into, need)
     print(f"leveling OK: lvl(75)={lvl}, into={into}, need={need}")
 
+    # Party mon leveling curve: inverse consistency across the full level range,
+    # plus cap behaviour for absurd EXP values (Party Mon Leveling Plan, Unit 5
+    # pre-deploy gate).
+    for _mon_lvl in range(1, leveling.MON_LEVEL_CAP):
+        _reach = leveling.mon_exp_to_reach(_mon_lvl)
+        assert leveling.mon_level_for_exp(_reach) == _mon_lvl, (_mon_lvl, _reach)
+        _next_reach = leveling.mon_exp_to_reach(_mon_lvl + 1)
+        assert leveling.mon_level_for_exp(_next_reach - 1) == _mon_lvl, (_mon_lvl, _next_reach)
+    _cap_reach = leveling.mon_exp_to_reach(leveling.MON_LEVEL_CAP)
+    assert leveling.mon_level_for_exp(_cap_reach) == leveling.MON_LEVEL_CAP, _cap_reach
+    assert leveling.mon_level_for_exp(_cap_reach * 1000) == leveling.MON_LEVEL_CAP
+    print(
+        f"mon leveling curve OK: inverse holds for L in 1..{leveling.MON_LEVEL_CAP}, "
+        "cap holds for absurd EXP"
+    )
+
     # Global EXP: award to the same user across two guilds and check global sums
     # while per-guild rows stay independent.
     from pokesketch.cogs.submissions import _award_exp
@@ -160,6 +176,36 @@ async def main() -> None:
         f"upvote exp OK: received capped at {recv_total} "
         f"(+{leveling.EXP_PER_UPVOTE_RECEIVED}/upvote), given capped at {given_total} "
         f"(+{leveling.EXP_PER_UPVOTE_GIVEN}/upvote)"
+    )
+
+    # Party mon EXP: an upvote on a submission still credits its sourced mon
+    # even when that mon is boxed (is_active=False) — the one exception to
+    # "boxed mons are frozen" per the Party Mon Leveling Plan (#5).
+    async with db.session() as s:
+        boxed_mon = db.CaughtMon(
+            user_id=recv_uid,
+            is_active=False,
+            slot=1,
+            dex_no=1,
+            name="bulbasaur",
+            cached_image_path="/nonexistent/boxed.png",
+            source_submission_id=sub_uv.id,
+        )
+        s.add(boxed_mon)
+        await s.commit()
+        boxed_mon_id = boxed_mon.id
+    async with db.session() as s:
+        await Submissions._maybe_award_upvote_received_exp(s, sub_uv)
+        await s.commit()
+    async with db.session() as s:
+        refreshed_boxed_mon = (
+            await s.execute(select(db.CaughtMon).where(db.CaughtMon.id == boxed_mon_id))
+        ).scalar_one()
+    assert refreshed_boxed_mon.mon_exp == leveling.MON_EXP_UPVOTE, refreshed_boxed_mon.mon_exp
+    assert refreshed_boxed_mon.is_active is False
+    print(
+        "boxed-mon upvote OK: a boxed mon still gains "
+        f"MON_EXP_UPVOTE={leveling.MON_EXP_UPVOTE} from an upvote on its own sketch"
     )
 
     # --- PokeBox, Party & Pokeballs ---
