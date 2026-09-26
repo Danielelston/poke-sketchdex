@@ -47,12 +47,26 @@ class _FakeResponse:
     def __init__(self) -> None:
         self.sent: dict | None = None
         self.edited: dict | None = None
+        self.deferred = False
+        self.deferred_ephemeral: bool | None = None
 
     async def send_message(self, content=None, *, embed=None, view=None, ephemeral=False) -> None:
         self.sent = {"embed": embed, "view": view, "ephemeral": ephemeral, "content": content}
 
     async def edit_message(self, *, embed=None, view=None) -> None:
         self.edited = {"embed": embed, "view": view}
+
+    async def defer(self, *, ephemeral: bool = False) -> None:
+        self.deferred = True
+        self.deferred_ephemeral = ephemeral
+
+
+class _FakeFollowup:
+    def __init__(self) -> None:
+        self.sent: dict | None = None
+
+    async def send(self, content=None, *, embed=None, view=None, ephemeral=False) -> None:
+        self.sent = {"embed": embed, "view": view, "ephemeral": ephemeral, "content": content}
 
 
 class _FakeMessage:
@@ -70,6 +84,7 @@ class _FakeInteraction:
         self.message = _FakeMessage(message_id) if message_id is not None else None
         self.client = _FakeClient(api)
         self.response = _FakeResponse()
+        self.followup = _FakeFollowup()
 
 
 class _FakeApi:
@@ -194,13 +209,15 @@ def test_click_produces_ephemeral_response_default_variety_first():
 
         await view.view_alt_forms.callback(interaction)
 
-        assert interaction.response.sent is not None
-        assert interaction.response.sent["ephemeral"] is True
-        assert "Form 1/3" in interaction.response.sent["embed"].description
+        assert interaction.response.deferred is True
+        assert interaction.response.deferred_ephemeral is True
+        assert interaction.followup.sent is not None
+        assert interaction.followup.sent["ephemeral"] is True
+        assert "Form 1/3" in interaction.followup.sent["embed"].description
         assert forms.forms[0].is_default
         assert api.calls == [479]
 
-        paginator = interaction.response.sent["view"]
+        paginator = interaction.followup.sent["view"]
         assert isinstance(paginator, ui._FormsPaginatorView)
         assert paginator.index == 0
         assert paginator.prev_button.disabled is True
@@ -227,7 +244,7 @@ def test_prev_next_page_through_all_forms():
         interaction = _FakeInteraction(message_id=333, api=api)
         view = ui.FormsButtonView()
         await view.view_alt_forms.callback(interaction)
-        paginator = interaction.response.sent["view"]
+        paginator = interaction.followup.sent["view"]
 
         page_interaction = _FakeInteraction(message_id=None, api=api)
         await paginator.next_button.callback(page_interaction)
@@ -265,11 +282,11 @@ def test_two_independent_clicks_get_independent_page_state():
 
         interaction_a = _FakeInteraction(message_id=333, api=api)
         await view.view_alt_forms.callback(interaction_a)
-        paginator_a = interaction_a.response.sent["view"]
+        paginator_a = interaction_a.followup.sent["view"]
 
         interaction_b = _FakeInteraction(message_id=333, api=api)
         await view.view_alt_forms.callback(interaction_b)
-        paginator_b = interaction_b.response.sent["view"]
+        paginator_b = interaction_b.followup.sent["view"]
 
         assert paginator_a is not paginator_b
 
@@ -299,7 +316,8 @@ def test_click_with_unresolved_message_sends_ephemeral_warning_not_crash(caplog)
         with caplog.at_level(logging.WARNING, logger="pokesketch.ui"):
             await view.view_alt_forms.callback(interaction)
 
-        assert interaction.response.sent["ephemeral"] is True
+        assert interaction.response.deferred is True
+        assert interaction.followup.sent["ephemeral"] is True
         assert api.calls == []  # never reached the forms lookup
         assert any("424242" in rec.message for rec in caplog.records)
 
@@ -328,7 +346,7 @@ def test_more_forms_exist_appends_closing_note_page():
         view = ui.FormsButtonView()
         await view.view_alt_forms.callback(interaction)
 
-        paginator = interaction.response.sent["view"]
+        paginator = interaction.followup.sent["view"]
         assert len(paginator.pages) == 13  # 12 sampled forms + 1 closing note
         assert "12 of 63" in paginator.pages[-1].description
 
