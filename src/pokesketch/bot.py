@@ -104,8 +104,16 @@ class PokeSketchDexBot(commands.Bot):
             await self.tree.sync(guild=target)
             log.info("Synced commands to guild %s (%s)", guild.id, guild.name)
 
+        # Wipe any stray *remote* global registration, but keep the local
+        # in-memory global command definitions afterward — on_guild_join's
+        # copy_global_to() reads from this local bucket for every future
+        # guild join, so clearing it permanently here would silently
+        # register zero commands on any guild joined after this point.
+        global_cmds = self.tree.get_commands(guild=None)
         self.tree.clear_commands(guild=None)
         await self.tree.sync()  # pushes the (now empty) global command set
+        for cmd in global_cmds:
+            self.tree.add_command(cmd)
         log.info("Cleared any global command registrations.")
 
     async def _schedule_all_guilds(self) -> None:
