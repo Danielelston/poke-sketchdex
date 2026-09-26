@@ -2536,6 +2536,224 @@ async def main() -> None:
     )
     print("help OK: documents one merged /profile command, /profile-card is gone")
 
+    # --- /rename: successful rename, successful clear, wrong-owner rejection,
+    # over-length/bad-char rejection, and autocomplete ordering + 25-cap
+    # truncation. Drives the real cog command callback and autocomplete
+    # callback end-to-end (not just the pokebox.rename_mon/renameable_mons
+    # helpers), with a mocked Interaction capturing whatever kwarg the
+    # handler passed to interaction.response.send_message — same pattern as
+    # the /event-* admin checks above.
+    from pokesketch.cogs.collection import MAX_AUTOCOMPLETE_CHOICES, Collection
+
+    rename_guild = 7001
+    rename_uid = 7002
+    other_uid = 7003
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=rename_guild, dex_min=1, dex_max=1))
+        s.add(db.DailyPokemon(guild_id=rename_guild, local_date=_date.today(), dex_no=10, name="caterpie"))
+        await s.commit()
+        rename_daily = (
+            await s.execute(select(db.DailyPokemon).where(db.DailyPokemon.guild_id == rename_guild))
+        ).scalar_one()
+        # 20 submissions for rename_uid — pokebox.MAX_TOTAL (6 active + 14 box)
+        # is the real per-user combined cap (see the /catch cap test above);
+        # a player can never actually reach the 26-mon (6 active + 20 box)
+        # figure the design doc's autocomplete-cap example uses, so the
+        # 25-choice truncation itself is exercised below via a synthetic
+        # renameable_mons feed rather than 26 real caught rows. One extra
+        # submission for other_uid (for the wrong-owner rejection check).
+        for uid, count in ((rename_uid, 20), (other_uid, 1)):
+            for i in range(count):
+                s.add(
+                    db.Submission(
+                        guild_id=rename_guild, user_id=uid, daily_id=rename_daily.id,
+                        image_url=f"https://example.invalid/rename-{uid}-{i}.png",
+                    )
+                )
+        await s.commit()
+
+    for uid, amount in ((rename_uid, 30), (other_uid, 5)):
+        async with db.session() as s:
+            wallet = await pokebox.get_or_create_wallet(s, uid)
+            wallet.balance = amount
+            await s.commit()
+
+    rename_mons = []
+    for _ in range(pokebox.MAX_TOTAL):
+        async with db.session() as s:
+            mon = await pokebox.catch_submission(s, rename_uid, party_dir)
+            await s.commit()
+            rename_mons.append(mon)
+    assert sum(1 for m in rename_mons if m.is_active) == pokebox.MAX_ACTIVE
+    assert sum(1 for m in rename_mons if not m.is_active) == pokebox.MAX_TOTAL - pokebox.MAX_ACTIVE
+
+    async with db.session() as s:
+        other_mon = await pokebox.catch_submission(s, other_uid, party_dir)
+        await s.commit()
+
+    class _FakeCollectionUser:
+        def __init__(self, uid: int):
+            self.id = uid
+
+    class _FakeCollectionResponse:
+        def __init__(self):
+            self.sent: dict | None = None
+
+        async def send_message(self, content=None, **kwargs):
+            self.sent = {"content": content, **kwargs}
+
+    class _FakeCollectionInteraction:
+        def __init__(self, user_id: int):
+            self.user = _FakeCollectionUser(user_id)
+            self.response = _FakeCollectionResponse()
+
+    collection_cog = Collection(bot=None)
+
+    # Successful rename: nickname updates + confirmation shows the new display name.
+    rename_target = rename_mons[0]  # active slot 1
+    rename_interaction = _FakeCollectionInteraction(rename_uid)
+    await collection_cog.rename.callback(
+        collection_cog, rename_interaction, mon=str(rename_target.id), nickname="Sparky"
+    )
+    async with db.session() as s:
+        renamed = await s.get(db.CaughtMon, rename_target.id)
+    assert renamed.nickname == "Sparky", renamed.nickname
+    assert (
+        rename_interaction.response.sent["content"]
+        == f"✏️ Renamed to **{_collection_display_name(renamed)}**."
+    ), rename_interaction.response.sent
+    assert rename_interaction.response.sent.get("ephemeral") is True, rename_interaction.response.sent
+    print("rename OK: nickname updated, confirmation shows new display name")
+
+    # Successful clear: empty-string nickname reverts to species-only display.
+    clear_interaction = _FakeCollectionInteraction(rename_uid)
+    await collection_cog.rename.callback(
+        collection_cog, clear_interaction, mon=str(rename_target.id), nickname=""
+    )
+    async with db.session() as s:
+        cleared = await s.get(db.CaughtMon, rename_target.id)
+    assert cleared.nickname is None, cleared.nickname
+    assert (
+        clear_interaction.response.sent["content"]
+        == f"✏️ Renamed to **{_collection_display_name(cleared)}**."
+    ), clear_interaction.response.sent
+    assert "(" not in clear_interaction.response.sent["content"], clear_interaction.response.sent
+    print("rename clear OK: empty-string nickname clears back to species-only display")
+
+    # Wrong-owner rejection: a mon id belonging to another user fails with a
+    # plain ephemeral error, no exception surfaced, no mutation.
+    wrong_owner_interaction = _FakeCollectionInteraction(rename_uid)
+    await collection_cog.rename.callback(
+        collection_cog, wrong_owner_interaction, mon=str(other_mon.id), nickname="Nope"
+    )
+    async with db.session() as s:
+        other_after = await s.get(db.CaughtMon, other_mon.id)
+    assert other_after.nickname is None, other_after.nickname
+    wrong_owner_msg = "That mon isn't yours to rename — it may have been released or belong to someone else."
+    assert wrong_owner_interaction.response.sent["content"] == f"❌ {wrong_owner_msg}", (
+        wrong_owner_interaction.response.sent
+    )
+    assert wrong_owner_interaction.response.sent.get("ephemeral") is True
+
+    # Stale/deleted id: a nonexistent mon id fails the exact same generic way.
+    stale_interaction = _FakeCollectionInteraction(rename_uid)
+    await collection_cog.rename.callback(
+        collection_cog, stale_interaction, mon="99999999", nickname="Nope"
+    )
+    assert stale_interaction.response.sent["content"] == f"❌ {wrong_owner_msg}", stale_interaction.response.sent
+    print("rename rejection OK: wrong-owner and stale/nonexistent ids fail cleanly with no mutation")
+
+    # Over-length (>12 char) and disallowed-character nicknames are rejected
+    # with sanitize_nickname's existing (unchanged) error messages, no mutation.
+    async with db.session() as s:
+        pre_reject_nickname = (await s.get(db.CaughtMon, rename_target.id)).nickname
+    long_interaction = _FakeCollectionInteraction(rename_uid)
+    await collection_cog.rename.callback(
+        collection_cog, long_interaction, mon=str(rename_target.id), nickname="X" * 13
+    )
+    assert "12 characters" in long_interaction.response.sent["content"], long_interaction.response.sent
+    badchar_interaction = _FakeCollectionInteraction(rename_uid)
+    await collection_cog.rename.callback(
+        collection_cog, badchar_interaction, mon=str(rename_target.id), nickname="Sp@rky"
+    )
+    assert "letters, numbers, spaces" in badchar_interaction.response.sent["content"], (
+        badchar_interaction.response.sent
+    )
+    async with db.session() as s:
+        post_reject_nickname = (await s.get(db.CaughtMon, rename_target.id)).nickname
+    assert post_reject_nickname == pre_reject_nickname, (pre_reject_nickname, post_reject_nickname)
+    print(
+        "rename validation OK: over-length and bad-char nicknames rejected with "
+        "sanitize_nickname's unchanged messages, no mutation"
+    )
+
+    # Autocomplete ordering against the REAL (achievable) mon count: active
+    # slots 1-6 ascending, then box slots 1-14 ascending, all 20 fit under
+    # Discord's 25-choice max so nothing is truncated yet.
+    ac_interaction = _FakeCollectionInteraction(rename_uid)
+    real_choices = await collection_cog._rename_mon_autocomplete(ac_interaction, "")
+    assert len(real_choices) == pokebox.MAX_TOTAL, len(real_choices)
+    real_active, real_box = real_choices[:pokebox.MAX_ACTIVE], real_choices[pokebox.MAX_ACTIVE:]
+    for i, choice in enumerate(real_active, start=1):
+        assert choice.name.endswith(f"active slot {i}"), choice.name
+    for i, choice in enumerate(real_box, start=1):
+        assert choice.name.endswith(f"box slot {i}"), choice.name
+    print(
+        f"rename autocomplete OK: real {pokebox.MAX_TOTAL}-mon cap lists active-then-box ascending, "
+        "untruncated (below the 25-choice max)"
+    )
+
+    # 25-choice cap + truncation at the 26-mon boundary: pokebox.MAX_TOTAL is
+    # actually 20 (6 active + 14 box combined — see the /catch cap test
+    # above), so a real player can never reach the design doc's 26-mon
+    # (6 active + 20 box) example; a single caller's own mons can never
+    # exceed MAX_AUTOCOMPLETE_CHOICES in practice under the current storage
+    # cap. To still exercise the callback's own ordering/cap/substring-filter
+    # logic at that boundary, feed it a synthetic 26-entry renameable_mons
+    # result (bypassing catch_submission's storage cap, not the autocomplete
+    # code under test) and restore the real helper afterward.
+    class _FakeRenameMon:
+        def __init__(self, mon_id: int, is_active: bool, slot: int):
+            self.id = mon_id
+            self.dex_no = 1
+            self.name = "bulbasaur"
+            self.is_shiny = False
+            self.nickname = None
+            self.is_active = is_active
+            self.slot = slot
+
+    synthetic_mons = [_FakeRenameMon(90000 + i, True, i) for i in range(1, 7)] + [
+        _FakeRenameMon(91000 + i, False, i) for i in range(1, 21)
+    ]
+
+    async def _fake_renameable_mons(s, user_id):
+        return synthetic_mons
+
+    real_renameable_mons = pokebox.renameable_mons
+    pokebox.renameable_mons = _fake_renameable_mons
+    try:
+        choices = await collection_cog._rename_mon_autocomplete(ac_interaction, "")
+        assert len(choices) == MAX_AUTOCOMPLETE_CHOICES, len(choices)
+        active_choices, box_choices = choices[:6], choices[6:]
+        for i, choice in enumerate(active_choices, start=1):
+            assert choice.name.endswith(f"active slot {i}"), choice.name
+        assert len(box_choices) == MAX_AUTOCOMPLETE_CHOICES - 6
+        for i, choice in enumerate(box_choices, start=1):
+            assert choice.name.endswith(f"box slot {i}"), choice.name
+
+        # The dropped box slot 20 mon remains reachable via the existing
+        # current-substring filter, same recovery path /catch already relies on.
+        dropped_mon = next(m for m in synthetic_mons if not m.is_active and m.slot == 20)
+        filtered = await collection_cog._rename_mon_autocomplete(ac_interaction, "box slot 20")
+        assert len(filtered) == 1 and filtered[0].value == str(dropped_mon.id), filtered
+    finally:
+        pokebox.renameable_mons = real_renameable_mons
+    print(
+        "rename autocomplete OK: at a synthetic 26-mon (6 active + 20 box) boundary, "
+        "active-then-box ascending ordering holds, the 25-choice cap truncates box slot 20, "
+        "and it's recoverable via the substring filter"
+    )
+
     print("ALL SMOKE TESTS PASSED")
 
 
