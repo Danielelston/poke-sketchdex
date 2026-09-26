@@ -13,7 +13,7 @@ import io
 import logging
 import os
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from math import ceil
 
 import discord
@@ -22,6 +22,7 @@ from PIL import Image, ImageOps
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import selectinload
 
+from . import leveling
 from .db import (
     CaughtMon,
     DailyPokemon,
@@ -580,3 +581,54 @@ async def grant_weekly_pokeballs(s, now: datetime | None = None) -> int:
         wallet.last_granted_week = week
         granted += 1
     return granted
+
+
+# --- Party mon EXP (see Party Mon Leveling Plan design doc) ---
+
+
+async def award_mon_exp(s, mon: CaughtMon, amount: int, *, today: date) -> int:
+    """Apply the daily cap, add to mon_exp, recompute mon_level.
+
+    Mutates `mon` in place and returns the EXP actually awarded (may be less
+    than `amount`, down to zero, if the daily cap is already partly or fully
+    spent). Does not open its own transaction — the caller is expected to be
+    inside a `db.session()` block that also writes the triggering row, so the
+    read-then-write here commits atomically with it.
+    """
+    if mon.last_exp_date != today:
+        mon.exp_today = 0
+        mon.last_exp_date = today
+    awarded = max(0, min(amount, leveling.MON_EXP_DAILY_CAP - mon.exp_today))
+    if awarded:
+        mon.exp_today += awarded
+        mon.mon_exp += awarded
+        mon.mon_level = leveling.mon_level_for_exp(mon.mon_exp)
+    return awarded
+
+
+async def active_party_mons(s, user_id: int) -> list[CaughtMon]:
+    """The user's active party (`is_active == True`), at most 6 rows."""
+    return (
+        await s.execute(
+            select(CaughtMon)
+            .where(CaughtMon.user_id == user_id, CaughtMon.is_active)
+            .order_by(CaughtMon.slot)
+        )
+    ).scalars().all()
+
+
+async def mon_for_submission(s, submission_id: int, *, wild: bool) -> CaughtMon | None:
+    """The CaughtMon (if any) caught from the given submission.
+
+    A mon points at exactly one of `source_submission_id` (daily `Submission`)
+    or `source_wild_encounter_submission_id` (`WildEncounterSubmission`),
+    never both — `wild` selects which column to match against. Returns None
+    if no mon was ever caught from that submission (active or boxed either
+    way; this lookup ignores active/boxed status).
+    """
+    column = (
+        CaughtMon.source_wild_encounter_submission_id if wild else CaughtMon.source_submission_id
+    )
+    return (
+        await s.execute(select(CaughtMon).where(column == submission_id))
+    ).scalar_one_or_none()
