@@ -195,6 +195,7 @@ def _build_card_data(
             nickname=mon.nickname,
             sprite_path=sprite_paths.get(mon.slot),
             mon_level=mon.mon_level,
+            mon_exp=mon.mon_exp,
         )
         for mon in party[:MAX_PARTY_LINES]
     ]
