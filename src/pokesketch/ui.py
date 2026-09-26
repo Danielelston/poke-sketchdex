@@ -267,22 +267,32 @@ class FormsButtonView(discord.ui.View):
         # response window and surface as "The application didn't respond
         # in time" even though the bot is still working. Deferring buys the
         # full 15-minute followup window instead.
-        await interaction.response.defer(ephemeral=True)
-
         message_id = interaction.message.id if interaction.message is not None else None
-        resolved = await _resolve_species_for_message(message_id)
-        if resolved is None:
-            log.warning("view_alt_forms: no DailyPokemon/WildEncounter row matches message_id=%s", message_id)
-            await interaction.followup.send(
-                "Couldn't find this post's Pokemon data (it may be too old).", ephemeral=True
-            )
-            return
+        log.info("view_alt_forms: click received, message_id=%s", message_id)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            log.exception("view_alt_forms: defer() failed for message_id=%s", message_id)
+            raise
 
-        dex_no, name, shiny = resolved
-        forms = await interaction.client.api.get_species_forms(dex_no)  # type: ignore[attr-defined]
-        pages = _build_form_pages(dex_no, name, forms, shiny)
-        if not pages:
-            await interaction.followup.send("No alternate forms available for this Pokemon.", ephemeral=True)
-            return
+        try:
+            resolved = await _resolve_species_for_message(message_id)
+            if resolved is None:
+                log.warning("view_alt_forms: no DailyPokemon/WildEncounter row matches message_id=%s", message_id)
+                await interaction.followup.send(
+                    "Couldn't find this post's Pokemon data (it may be too old).", ephemeral=True
+                )
+                return
 
-        await interaction.followup.send(embed=pages[0], view=_FormsPaginatorView(pages), ephemeral=True)
+            dex_no, name, shiny = resolved
+            forms = await interaction.client.api.get_species_forms(dex_no)  # type: ignore[attr-defined]
+            pages = _build_form_pages(dex_no, name, forms, shiny)
+            if not pages:
+                await interaction.followup.send("No alternate forms available for this Pokemon.", ephemeral=True)
+                return
+
+            await interaction.followup.send(embed=pages[0], view=_FormsPaginatorView(pages), ephemeral=True)
+            log.info("view_alt_forms: followup sent ok for message_id=%s dex_no=%s", message_id, dex_no)
+        except Exception:
+            log.exception("view_alt_forms: failed after defer for message_id=%s", message_id)
+            raise
