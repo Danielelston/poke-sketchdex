@@ -18,6 +18,7 @@ from .daily import post_daily_for_guild, post_wild_encounter_for_guild
 from .daily_spotlight import post_daily_spotlight_for_guild
 from .default_events import seed_default_events
 from .pokeapi import PokeApiClient
+from .ui import FormsButtonView
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,14 @@ class PokeSketchDexBot(commands.Bot):
         self.api = PokeApiClient(config.image_cache_dir)
         self.scheduler = AsyncIOScheduler()
         self._commands_synced = False
+        # The single persistent "View Alt Forms" view instance -- registered
+        # once via add_view in _register_persistent_views, then reused by
+        # daily.py when attaching the button to a new announcement message
+        # (constructing a fresh instance per message would still render, but
+        # would defeat the point of a persistent view; see FormsButtonView's
+        # docstring). Read by daily.py as `client.forms_button_view`, mirroring
+        # the existing `self.bot.api` duck-typed access pattern.
+        self.forms_button_view = FormsButtonView()
 
     async def setup_hook(self) -> None:
         db.init_engine(self.config.db_path)
@@ -53,6 +62,8 @@ class PokeSketchDexBot(commands.Bot):
         for ext in INITIAL_EXTENSIONS:
             await self.load_extension(ext)
             log.info("Loaded extension %s", ext)
+
+        self._register_persistent_views()
 
         # Slash commands are synced per-guild once we're actually connected
         # and self.guilds is populated — see on_ready / _sync_all_joined_guilds.
@@ -64,6 +75,18 @@ class PokeSketchDexBot(commands.Bot):
         self._schedule_gym_expiry_check()
         self._schedule_daily_spotlight()
         self.scheduler.start()
+
+    def _register_persistent_views(self) -> None:
+        """Register every persistent view exactly once, before the gateway
+        needs to route any interaction to it — see FormsButtonView's
+        docstring for why this must happen in setup_hook, not per-message.
+        `forms_button_view` is normally already set in `__init__` (so
+        `daily.py` can reuse the same instance); guarded here too so this
+        method stays safe to call standalone.
+        """
+        if not hasattr(self, "forms_button_view"):
+            self.forms_button_view = FormsButtonView()
+        self.add_view(self.forms_button_view)
 
     async def _sync_all_joined_guilds(self) -> None:
         """Sync slash commands guild-scoped only, to every guild we're in.
