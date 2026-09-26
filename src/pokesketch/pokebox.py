@@ -428,9 +428,10 @@ async def swap_mon(s, user_id: int, box_slot: int, active_slot: int) -> tuple[Ca
     return boxed, active
 
 
-async def release_mon(s, user_id: int, slot: int, is_active: bool) -> str:
-    """Delete a CaughtMon row. Returns its cached image path for the caller to
-    remove from disk *after* the transaction commits."""
+async def release_mon(s, user_id: int, slot: int, is_active: bool) -> tuple[str, int]:
+    """Delete a CaughtMon row. Returns (its cached image path for the caller
+    to remove from disk *after* the transaction commits, its mon_level at
+    time of release — the level is otherwise lost once the row is gone)."""
     upper = MAX_ACTIVE if is_active else MAX_TOTAL
     if not (1 <= slot <= upper):
         raise CatchError(f"Slot must be 1-{upper}.")
@@ -445,8 +446,9 @@ async def release_mon(s, user_id: int, slot: int, is_active: bool) -> str:
         kind = "active" if is_active else "box"
         raise CatchError(f"No mon in {kind} slot {slot}.")
     path = mon.cached_image_path
+    mon_level = mon.mon_level
     await s.delete(mon)
-    return path
+    return path, mon_level
 
 
 async def total_caught_count(s, user_id: int) -> int:

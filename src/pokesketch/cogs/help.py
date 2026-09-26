@@ -39,6 +39,26 @@ def _exp_field_value() -> str:
     )
 
 
+def _mon_exp_field_value() -> str:
+    """Build the party-mon-leveling explainer from the live leveling constants.
+
+    Sourced directly from `leveling.py` so this never drifts out of sync with
+    the actual mon-EXP award logic — same no-drift rule as `_exp_field_value()`
+    above.
+    """
+    return (
+        f"• **Submit a sketch:** +{leveling.MON_EXP_SUBMIT} EXP to every mon in your active "
+        "party (daily or wild encounter, no split — a full party and a 1-mon party both get "
+        "the full amount)\n"
+        f"• **Get upvoted (👍 on your sketch):** +{leveling.MON_EXP_UPVOTE} EXP to the one mon "
+        "caught from that sketch (active or boxed)\n"
+        f"• **Receive kudos:** +{leveling.MON_EXP_KUDOS} EXP to every mon in your active party\n"
+        f"• Capped at +{leveling.MON_EXP_DAILY_CAP} EXP per mon per day\n\n"
+        f"Mons level up to a cap of **Lv. {leveling.MON_LEVEL_CAP}** — see your party's progress "
+        "on `/profile`. Purely cosmetic for now; level-ups are silent."
+    )
+
+
 def _admin_field_groups() -> list[tuple[str, str]]:
     """Admin command reference as (field name, field value) groups.
 
@@ -109,6 +129,7 @@ class Help(commands.Cog):
             color=0x5865F2,
         )
         _add_guarded_field(embed, "⭐ How EXP works", _exp_field_value())
+        _add_guarded_field(embed, "🐾 Party mon leveling", _mon_exp_field_value())
         _add_guarded_field(
             embed,
             "🧑‍🎨 Sketching & progress",
