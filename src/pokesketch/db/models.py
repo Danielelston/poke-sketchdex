@@ -302,9 +302,19 @@ class CaughtMon(Base):
     source_wild_encounter_submission_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("wild_encounter_submissions.id", ondelete="SET NULL"), nullable=True
     )
-    # Reserved for the deferred leveling stretch phase — unused, left at defaults.
+    # Running total party-mon EXP and its derived level (see Party Mon Leveling
+    # Plan design doc). mon_exp is append-only and never clamped; mon_level is
+    # recomputed from it via leveling.mon_level_for_exp and capped at
+    # leveling.MON_LEVEL_CAP. Both start at their defaults for every mon —
+    # there is no backfill for mons caught before this feature shipped.
     mon_exp: Mapped[int] = mapped_column(Integer, default=0)
     mon_level: Mapped[int] = mapped_column(Integer, default=1)
+    # Per-day EXP accounting for leveling.MON_EXP_DAILY_CAP. Reset lazily by
+    # award_mon_exp() when last_exp_date != today (UTC) rather than by a
+    # scheduled job. last_exp_date is nullable so a never-yet-awarded mon
+    # doesn't need a sentinel date.
+    exp_today: Mapped[int] = mapped_column(Integer, default=0)
+    last_exp_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
 
 class WeeklyVote(Base):
