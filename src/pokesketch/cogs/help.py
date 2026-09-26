@@ -131,6 +131,7 @@ class Help(commands.Cog):
             "`/box [user]` — paginated view of your storage box\n"
             "`/swap <box_slot> <active_slot>` — swap a boxed mon into your active party\n"
             "`/release <slot> [active]` — release a caught mon and free its slot\n"
+            "`/rename <mon> <nickname>` — rename (or clear the nickname of) a caught mon\n"
             "`/pokeballs [user]` — your pokeball balance and next weekly grant",
         )
         _add_guarded_field(

@@ -194,6 +194,55 @@ class Collection(commands.Cog):
         kind = "active" if active else "box"
         await interaction.response.send_message(f"🕊️ Released the mon in {kind} slot {slot}.", ephemeral=True)
 
+    async def _rename_mon_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        async with db.session() as s:
+            mons = await pokebox.renameable_mons(s, interaction.user.id)
+
+        results: list[tuple[str, str]] = []
+        for mon in mons:
+            kind = "active" if mon.is_active else "box"
+            label = f"{_display_name(mon)} — {kind} slot {mon.slot}"
+            results.append((label, str(mon.id)))
+
+        if current:
+            cur = current.lower()
+            results = [r for r in results if cur in r[0].lower()]
+
+        return [
+            app_commands.Choice(name=label, value=value)
+            for label, value in results[:MAX_AUTOCOMPLETE_CHOICES]
+        ]
+
+    @app_commands.command(name="rename", description="Rename (or clear the nickname of) one of your caught mons.")
+    @app_commands.describe(
+        mon="Which caught mon to rename",
+        nickname="New nickname (max 12 chars) — leave blank to clear it",
+    )
+    @app_commands.autocomplete(mon=_rename_mon_autocomplete)
+    async def rename(self, interaction: discord.Interaction, mon: str, nickname: str) -> None:
+        try:
+            mon_id = int(mon)
+        except ValueError:
+            mon_id = -1
+
+        try:
+            async with db.session() as s:
+                if mon_id == -1:
+                    raise pokebox.CatchError(
+                        "That mon isn't yours to rename — it may have been released or belong to someone else."
+                    )
+                renamed = await pokebox.rename_mon(s, interaction.user.id, mon_id, nickname)
+                await s.commit()
+        except pokebox.CatchError as exc:
+            await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"✏️ Renamed to **{_display_name(renamed)}**.", ephemeral=True
+        )
+
     @app_commands.command(name="pokeballs", description="Show your (or someone's) pokeball balance.")
     @app_commands.describe(user="Whose balance to show (default: you)")
     async def pokeballs(self, interaction: discord.Interaction, user: discord.User | None = None) -> None:
