@@ -195,6 +195,7 @@ def _build_card_data(
             nickname=mon.nickname,
             sprite_path=sprite_paths.get(mon.slot),
             mon_level=mon.mon_level,
+            mon_exp=mon.mon_exp,
         )
         for mon in party[:MAX_PARTY_LINES]
     ]
@@ -302,6 +303,16 @@ class ProfileView(discord.ui.View):
                 )
                 return
             s.add(db.Kudos(target_user_id=self.target_id, voter_id=interaction.user.id))
+
+            # Party mon EXP: MON_EXP_KUDOS to every active party mon of the
+            # target (never the giver). Failure-isolated so a leveling bug
+            # can never block the Kudos row from committing below.
+            try:
+                mons = await pokebox.active_party_mons(s, self.target_id)
+                await pokebox.award_mon_exp_to_party(s, mons, leveling.MON_EXP_KUDOS)
+            except Exception:
+                log.exception("mon-EXP: kudos grant failed for target_id=%s", self.target_id)
+
             await s.commit()
             count = await _kudos_count(s, self.target_id)
 

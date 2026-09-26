@@ -67,6 +67,22 @@ async def main() -> None:
     assert lvl == 2 and into == 25 and need == 100, (lvl, into, need)
     print(f"leveling OK: lvl(75)={lvl}, into={into}, need={need}")
 
+    # Party mon leveling curve: inverse consistency across the full level range,
+    # plus cap behaviour for absurd EXP values (Party Mon Leveling Plan, Unit 5
+    # pre-deploy gate).
+    for _mon_lvl in range(1, leveling.MON_LEVEL_CAP):
+        _reach = leveling.mon_exp_to_reach(_mon_lvl)
+        assert leveling.mon_level_for_exp(_reach) == _mon_lvl, (_mon_lvl, _reach)
+        _next_reach = leveling.mon_exp_to_reach(_mon_lvl + 1)
+        assert leveling.mon_level_for_exp(_next_reach - 1) == _mon_lvl, (_mon_lvl, _next_reach)
+    _cap_reach = leveling.mon_exp_to_reach(leveling.MON_LEVEL_CAP)
+    assert leveling.mon_level_for_exp(_cap_reach) == leveling.MON_LEVEL_CAP, _cap_reach
+    assert leveling.mon_level_for_exp(_cap_reach * 1000) == leveling.MON_LEVEL_CAP
+    print(
+        f"mon leveling curve OK: inverse holds for L in 1..{leveling.MON_LEVEL_CAP}, "
+        "cap holds for absurd EXP"
+    )
+
     # Global EXP: award to the same user across two guilds and check global sums
     # while per-guild rows stay independent.
     from pokesketch.cogs.submissions import _award_exp
@@ -160,6 +176,36 @@ async def main() -> None:
         f"upvote exp OK: received capped at {recv_total} "
         f"(+{leveling.EXP_PER_UPVOTE_RECEIVED}/upvote), given capped at {given_total} "
         f"(+{leveling.EXP_PER_UPVOTE_GIVEN}/upvote)"
+    )
+
+    # Party mon EXP: an upvote on a submission still credits its sourced mon
+    # even when that mon is boxed (is_active=False) — the one exception to
+    # "boxed mons are frozen" per the Party Mon Leveling Plan (#5).
+    async with db.session() as s:
+        boxed_mon = db.CaughtMon(
+            user_id=recv_uid,
+            is_active=False,
+            slot=1,
+            dex_no=1,
+            name="bulbasaur",
+            cached_image_path="/nonexistent/boxed.png",
+            source_submission_id=sub_uv.id,
+        )
+        s.add(boxed_mon)
+        await s.commit()
+        boxed_mon_id = boxed_mon.id
+    async with db.session() as s:
+        await Submissions._maybe_award_upvote_received_exp(s, sub_uv)
+        await s.commit()
+    async with db.session() as s:
+        refreshed_boxed_mon = (
+            await s.execute(select(db.CaughtMon).where(db.CaughtMon.id == boxed_mon_id))
+        ).scalar_one()
+    assert refreshed_boxed_mon.mon_exp == leveling.MON_EXP_UPVOTE, refreshed_boxed_mon.mon_exp
+    assert refreshed_boxed_mon.is_active is False
+    print(
+        "boxed-mon upvote OK: a boxed mon still gains "
+        f"MON_EXP_UPVOTE={leveling.MON_EXP_UPVOTE} from an upvote on its own sketch"
     )
 
     # --- PokeBox, Party & Pokeballs ---
@@ -295,7 +341,7 @@ async def main() -> None:
     target = box[0]
     assert os.path.exists(target.cached_image_path), target.cached_image_path
     async with db.session() as s:
-        released_path = await pokebox.release_mon(s, pb_uid, target.slot, is_active=False)
+        released_path, _released_level = await pokebox.release_mon(s, pb_uid, target.slot, is_active=False)
         await s.commit()
     pokebox.delete_cached_file(released_path)
     assert not os.path.exists(released_path), released_path
@@ -2278,6 +2324,30 @@ async def main() -> None:
     # Kudos: 0 -> 1 via the real button callback, duplicate vote from the same
     # voter rejected, self-kudos rejected — exercised through the actual
     # ProfileView.give_kudos callback, not a query-layer unit test.
+    #
+    # Party mon EXP (Party Mon Leveling Plan, Unit 3): kudos must grant
+    # MON_EXP_KUDOS to every active party mon of the TARGET (profile_uid
+    # already has an active party from the /catch calls above), never the
+    # giver's, and a second kudos from the same voter must grant no further
+    # EXP (piggybacking on the existing unique-constraint rejection).
+    kudos_today = _datetime.now(UTC).date()
+
+    def _expected_award(mon, amount: int) -> int:
+        # Mirror award_mon_exp()'s own daily-cap math: whatever a mon already
+        # earned *today* (e.g. from the /submit hook exercised earlier in
+        # this run) eats into the same MON_EXP_DAILY_CAP a kudos grant draws
+        # from, so a 250 MON_EXP_KUDOS hit can legitimately be partially (or,
+        # if the mon is already capped for today, not at all) awarded.
+        exp_today = mon.exp_today if mon.last_exp_date == kudos_today else 0
+        return max(0, min(amount, leveling.MON_EXP_DAILY_CAP - exp_today))
+
+    async with db.session() as s:
+        target_party_before = await pokebox.active_party_mons(s, profile_uid)
+    assert target_party_before, "expected profile_uid to already have an active party from the /catch calls above"
+    target_mon_state_before = {
+        m.id: (m.mon_exp, _expected_award(m, leveling.MON_EXP_KUDOS)) for m in target_party_before
+    }
+
     kudos_voter = _FakeProfileUser(8001, display_name="Voter")
     kudos_interaction_1 = _FakeProfileInteraction(kudos_voter, guild_id=profile_gid)
     kudos_button = profile_view.give_kudos
@@ -2285,11 +2355,30 @@ async def main() -> None:
     assert kudos_button.label == "Give Kudos (1)", kudos_button.label
     assert kudos_interaction_1.response.edited is not None, "expected the kudos click to edit the message"
 
+    async with db.session() as s:
+        target_party_after = await pokebox.active_party_mons(s, profile_uid)
+        voter_party_after = await pokebox.active_party_mons(s, kudos_voter.id)
+    assert not voter_party_after, "the giver has no party mons and must gain none from giving kudos"
+    for mon in target_party_after:
+        exp_before, expected_award = target_mon_state_before[mon.id]
+        assert mon.mon_exp == exp_before + expected_award, (mon.id, mon.mon_exp, exp_before, expected_award)
+    print(
+        "kudos mon-EXP OK: every active party mon of the target gained its correctly "
+        f"daily-cap-limited share of MON_EXP_KUDOS={leveling.MON_EXP_KUDOS}, giver's (empty) party untouched"
+    )
+
     kudos_interaction_dup = _FakeProfileInteraction(kudos_voter, guild_id=profile_gid)
     await kudos_button.callback(kudos_interaction_dup)
     assert kudos_button.label == "Give Kudos (1)", "duplicate vote from the same voter must not increment"
     dup_sent = kudos_interaction_dup.response.sent_message
     assert dup_sent is not None and "already given" in str(dup_sent).lower(), dup_sent
+
+    async with db.session() as s:
+        target_party_after_dup = await pokebox.active_party_mons(s, profile_uid)
+    for mon in target_party_after_dup:
+        exp_before, expected_award = target_mon_state_before[mon.id]
+        assert mon.mon_exp == exp_before + expected_award, "a rejected duplicate kudos must grant no further mon EXP"
+    print("kudos mon-EXP OK: a rejected duplicate kudos grants no further EXP")
 
     kudos_self_interaction = _FakeProfileInteraction(profile_user, guild_id=profile_gid)
     await kudos_button.callback(kudos_self_interaction)
