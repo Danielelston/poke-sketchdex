@@ -70,6 +70,32 @@ def _window_summary_line(local_date: date, grace_period_days: int, catch_window_
     )
 
 
+async def _forms_view_for_dex(client: discord.Client, api: PokeApiClient, dex_no: int) -> discord.ui.View | None:
+    """Resolve the persistent "View Alt Forms" view to attach to a fresh
+    daily/wild-encounter announcement, or None when the species has only one
+    eligible natural form (today's single-embed post stays unchanged) — see
+    Design/Multiform Pokemon Reference Picker Plan.md.
+
+    `PokeApiClient.get_species_forms` already degrades its own PokeAPI
+    failures to a single-form result, but this wraps the call in a broad
+    except anyway (and treats a client with no `get_species_forms`/
+    `forms_button_view` the same way) so a forms lookup can never raise into
+    `post_daily_for_guild`/`post_wild_encounter_for_guild` and delay or block
+    that day's post. Reuses the bot's single persistent view instance
+    (`client.forms_button_view`, registered once in `PokeSketchDexBot.setup_hook`)
+    rather than constructing a new one per message, which would defeat
+    cross-restart persistence.
+    """
+    try:
+        forms = await api.get_species_forms(dex_no)
+    except Exception:  # noqa: BLE001 - a forms-lookup failure must never block the post
+        log.warning("Forms lookup failed for dex %s; posting without alt-forms button.", dex_no, exc_info=True)
+        return None
+    if not forms.has_alt_forms:
+        return None
+    return getattr(client, "forms_button_view", None)
+
+
 def _wild_encounter_window_summary_line(local_date: date, catch_window_hours: int, tz_name: str) -> str:
     """Same idea as _window_summary_line, but wild-encounter threads have no
     grace-period backfill at all: /submit only accepts same-guild-local-day
@@ -128,11 +154,14 @@ async def post_daily_for_guild(
             log.warning("Guild %s: channel %s not found.", guild_id, channel_id)
             return False
 
+    forms_view = await _forms_view_for_dex(client, api, dex_no)
+
     role_mention = f"<@&{role_id}>" if role_id else ""
     embed = daily_embed(ref, shiny, images)
     msg = await channel.send(
         content=f"{role_mention} 🎨 A new Pokemon to sketch today!".strip(),
         embed=embed,
+        view=forms_view,
         allowed_mentions=discord.AllowedMentions(roles=True),
     )
 
@@ -220,12 +249,14 @@ async def post_wild_encounter_for_guild(
             log.warning("Guild %s: channel %s not found.", guild_id, channel_id)
             return False
 
+    forms_view = await _forms_view_for_dex(client, api, dex_no)
+
     embed = daily_embed(ref, False, images)
     embed.title = f"🌿 Wild encounter: #{ref.dex_no:04d} {ref.display_name()}"
     if theme_category == weeklyvote.CATEGORY_TYPE and theme_choice_key:
         theme_emoji = weeklyvote.type_emoji(theme_choice_key)
         embed.set_footer(text=f"{theme_emoji} This week's theme: {theme_choice_key.title()}-type")
-    msg = await channel.send(content="A wild Pokemon appeared!", embed=embed)
+    msg = await channel.send(content="A wild Pokemon appeared!", embed=embed, view=forms_view)
 
     thread = None
     try:
