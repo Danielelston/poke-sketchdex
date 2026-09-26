@@ -449,6 +449,43 @@ async def release_mon(s, user_id: int, slot: int, is_active: bool) -> str:
     return path
 
 
+async def rename_mon(s, user_id: int, mon_id: int, raw_nickname: str) -> CaughtMon:
+    """Rename or clear the nickname of a mon the caller owns.
+
+    Always re-resolves mon_id against CaughtMon.id == mon_id AND
+    CaughtMon.user_id == user_id at execution time — never trusts an
+    autocomplete-supplied value blindly, since a user can hand-type an
+    arbitrary id into the field (same "always re-validate server-side" rule
+    /catch's target param already follows). Raises CatchError on any failure
+    (wrong owner, deleted/released mon, or a nickname sanitize_nickname
+    rejects) rather than returning None silently. An empty raw_nickname
+    clears the nickname to None via sanitize_nickname's existing "blank
+    after strip -> None" behavior, unchanged.
+    """
+    mon = (
+        await s.execute(
+            select(CaughtMon).where(CaughtMon.id == mon_id, CaughtMon.user_id == user_id)
+        )
+    ).scalar_one_or_none()
+    if mon is None:
+        raise CatchError(
+            "That mon isn't yours to rename — it may have been released or belong to someone else."
+        )
+    mon.nickname = sanitize_nickname(raw_nickname)
+    return mon
+
+
+async def renameable_mons(s, user_id: int) -> list[CaughtMon]:
+    """All of the caller's own caught mons, active party slots first
+    (ascending), then box slots (ascending) — the ordering /rename's
+    autocomplete lists from. Returns the full unfiltered, uncapped list;
+    the 25-choice cap and substring filtering are applied at the
+    Discord-callback layer, not here."""
+    active = await party_listing(s, user_id)
+    boxed = await box_listing(s, user_id)
+    return [*active, *boxed]
+
+
 async def total_caught_count(s, user_id: int) -> int:
     """Total CaughtMon rows (active + boxed) for a user — the /20 cap."""
     return (
