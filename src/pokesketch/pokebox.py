@@ -13,7 +13,7 @@ import io
 import logging
 import os
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from math import ceil
 
 import discord
@@ -22,6 +22,7 @@ from PIL import Image, ImageOps
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import selectinload
 
+from . import leveling
 from .db import (
     CaughtMon,
     DailyPokemon,
@@ -428,9 +429,10 @@ async def swap_mon(s, user_id: int, box_slot: int, active_slot: int) -> tuple[Ca
     return boxed, active
 
 
-async def release_mon(s, user_id: int, slot: int, is_active: bool) -> str:
-    """Delete a CaughtMon row. Returns its cached image path for the caller to
-    remove from disk *after* the transaction commits."""
+async def release_mon(s, user_id: int, slot: int, is_active: bool) -> tuple[str, int]:
+    """Delete a CaughtMon row. Returns (its cached image path for the caller
+    to remove from disk *after* the transaction commits, its mon_level at
+    time of release — the level is otherwise lost once the row is gone)."""
     upper = MAX_ACTIVE if is_active else MAX_TOTAL
     if not (1 <= slot <= upper):
         raise CatchError(f"Slot must be 1-{upper}.")
@@ -445,8 +447,9 @@ async def release_mon(s, user_id: int, slot: int, is_active: bool) -> str:
         kind = "active" if is_active else "box"
         raise CatchError(f"No mon in {kind} slot {slot}.")
     path = mon.cached_image_path
+    mon_level = mon.mon_level
     await s.delete(mon)
-    return path
+    return path, mon_level
 
 
 async def total_caught_count(s, user_id: int) -> int:
@@ -580,3 +583,77 @@ async def grant_weekly_pokeballs(s, now: datetime | None = None) -> int:
         wallet.last_granted_week = week
         granted += 1
     return granted
+
+
+# --- Party mon EXP (see Party Mon Leveling Plan design doc) ---
+
+
+async def award_mon_exp(s, mon: CaughtMon, amount: int, *, today: date) -> int:
+    """Apply the daily cap, add to mon_exp, recompute mon_level.
+
+    Mutates `mon` in place and returns the EXP actually awarded (may be less
+    than `amount`, down to zero, if the daily cap is already partly or fully
+    spent). Does not open its own transaction — the caller is expected to be
+    inside a `db.session()` block that also writes the triggering row, so the
+    read-then-write here commits atomically with it.
+    """
+    if mon.last_exp_date != today:
+        mon.exp_today = 0
+        mon.last_exp_date = today
+    awarded = max(0, min(amount, leveling.MON_EXP_DAILY_CAP - mon.exp_today))
+    if awarded:
+        mon.exp_today += awarded
+        mon.mon_exp += awarded
+        mon.mon_level = leveling.mon_level_for_exp(mon.mon_exp)
+    return awarded
+
+
+async def active_party_mons(s, user_id: int) -> list[CaughtMon]:
+    """The user's active party (`is_active == True`), at most 6 rows."""
+    return (
+        await s.execute(
+            select(CaughtMon)
+            .where(CaughtMon.user_id == user_id, CaughtMon.is_active)
+            .order_by(CaughtMon.slot)
+        )
+    ).scalars().all()
+
+
+async def mon_for_submission(s, submission_id: int, *, wild: bool) -> CaughtMon | None:
+    """The CaughtMon (if any) caught from the given submission.
+
+    A mon points at exactly one of `source_submission_id` (daily `Submission`)
+    or `source_wild_encounter_submission_id` (`WildEncounterSubmission`),
+    never both — `wild` selects which column to match against. Returns None
+    if no mon was ever caught from that submission (active or boxed either
+    way; this lookup ignores active/boxed status).
+    """
+    column = (
+        CaughtMon.source_wild_encounter_submission_id if wild else CaughtMon.source_submission_id
+    )
+    return (
+        await s.execute(select(CaughtMon).where(column == submission_id))
+    ).scalar_one_or_none()
+
+
+async def award_mon_exp_to_party(s, mons: list[CaughtMon], amount: int) -> None:
+    """Award `amount` mon EXP to each mon in `mons` via `award_mon_exp`.
+
+    Shared by all three mon-EXP trigger sites (own submission, upvote
+    received, kudos received) so the per-mon isolation and logging live in
+    one place. Each mon's grant is wrapped individually: a bug awarding one
+    mon must never stop the rest, or the submission/upvote/kudos row and the
+    player's own EXP that rides alongside it. Failures are logged with the
+    owning user's ID and the mon's ID (visible via `journalctl -u
+    pokesketch`) and swallowed — callers get no exception and no return
+    value to check. An empty `mons` list is a no-op: nothing awarded,
+    nothing logged.
+    """
+    today = datetime.now(UTC).date()
+    for mon in mons:
+        try:
+            await award_mon_exp(s, mon, amount, today=today)
+        except Exception:
+            log.exception(
+                "mon-EXP award failed for user_id=%s mon_id=%s", mon.user_id, mon.id
+            )
