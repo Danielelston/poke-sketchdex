@@ -26,11 +26,10 @@ shiny, blurple otherwise) and an official-artwork sprite. The card is taller
 than it is wide (CARD_WIDTH=560) so it reads well on a phone screen without
 horizontal scrolling. Deliberately does NOT reproduce the mockup's full-bleed
 watermark background (see rank_badges.py's module docstring for why that was
-dropped). Each party tile shows a "Lv. {N}" badge (PartyCardSlot.mon_level,
-same _draw_level_badge() style as the header) — note CaughtMon.mon_level is
-currently a reserved/unused leveling-stretch-phase column that's always 1 for
-every mon; it's shown anyway per explicit user direction (2026-09-24) ahead
-of that feature actually shipping, so every party tile reads "Lv. 1" today.
+dropped). Each party tile shows a "Lv. {N}" badge (PartyCardSlot.mon_level, same
+_draw_level_badge() style as the header) plus a progress readout underneath
+("x/y EXP" toward the next level, or "MAX" at leveling.MON_LEVEL_CAP) — see
+the Party Mon Leveling Plan design doc.
 """
 
 from __future__ import annotations
@@ -41,6 +40,8 @@ import logging
 from dataclasses import dataclass, field
 
 from PIL import Image, ImageDraw, ImageFont
+
+from . import leveling
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +112,12 @@ PARTY_LEVEL_BADGE_PAD_X = 8  # smaller than the header's level badge (party tile
 PARTY_LEVEL_BADGE_PAD_Y = 4
 PARTY_LEVEL_FONT_SIZE = 11
 
+# EXP progress readout row — a compact "x/y EXP" (or "MAX" at the level cap)
+# drawn under the name/level row. See Party Mon Leveling Plan design doc.
+PARTY_EXP_FONT_SIZE = 12
+PARTY_EXP_LINE_HEIGHT = 16
+PARTY_EXP_LINE_GAP = 2
+
 # Image/sketch-canvas area: reserves the MOST vertical room in the tile since
 # this is where a future "user sketches here" canvas will live (sprite is a
 # stand-in for now) — per user direction (2026-09-24): "Let the sprite
@@ -131,6 +138,8 @@ PARTY_TILE_HEIGHT = (
     + PARTY_NAME_LINE_HEIGHT
     + PARTY_TEXT_LINE_GAP
     + PARTY_SPECIES_LINE_HEIGHT
+    + PARTY_TEXT_LINE_GAP
+    + PARTY_EXP_LINE_HEIGHT
     + PARTY_BOTTOM_PAD
 )
 PARTY_SECTION_HEIGHT = (
@@ -173,11 +182,12 @@ class PartyCardSlot:
     # module stays synchronous and just opens+composites it), or None if no
     # sprite was fetched/available.
     sprite_path: str | None = None
-    # CaughtMon.mon_level — reserved/unused leveling-stretch-phase column,
-    # always 1 today until that feature ships. Shown anyway per explicit
-    # user direction (2026-09-24): "show it anyway ... will always read
-    # 'Lv. 1' for every mon right now, until the leveling feature ships."
+    # CaughtMon.mon_level — the mon's current level (party mon leveling
+    # feature, see Party Mon Leveling Plan design doc).
     mon_level: int = 1
+    # CaughtMon.mon_exp — raw cumulative EXP backing mon_level. Drives the
+    # tile's progress readout (x/y EXP, or MAX at leveling.MON_LEVEL_CAP).
+    mon_exp: int = 0
 
 
 @dataclass
@@ -546,6 +556,7 @@ def _draw_party_tile(
     dex_font: ImageFont.FreeTypeFont,
     slot_badge_font: ImageFont.FreeTypeFont,
     level_badge_font: ImageFont.FreeTypeFont,
+    exp_font: ImageFont.FreeTypeFont,
 ) -> None:
     x0, y0, x1, y1 = box
     if slot is None:
@@ -638,6 +649,17 @@ def _draw_party_tile(
     species_color = COLOR_GOLD if slot.is_shiny else COLOR_SUBTEXT
     draw.text((text_left, species_row_y), species_label, font=dex_font, fill=species_color)
 
+    # Row 3: EXP progress readout — "x/y EXP" toward the next level, or
+    # "MAX" (not a division) once the mon has reached leveling.MON_LEVEL_CAP.
+    exp_row_y = species_row_y + PARTY_SPECIES_LINE_HEIGHT + PARTY_TEXT_LINE_GAP
+    if slot.mon_level >= leveling.MON_LEVEL_CAP:
+        exp_label = "MAX"
+    else:
+        _lvl, into, need = leveling.mon_exp_into_level(slot.mon_exp)
+        exp_label = f"{into}/{need} EXP"
+    exp_label = _truncate_to_width(exp_label, exp_font, max_w)
+    draw.text((text_left, exp_row_y), exp_label, font=exp_font, fill=COLOR_SUBTEXT)
+
     # Slot number as a small corner-ribbon badge (top-right) instead of a
     # plain circle — flush with the tile's own rounded corner, concave inner
     # arc, per the mockup reference the user supplied. Bold font for
@@ -666,6 +688,7 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
     party_dex_font = ImageFont.truetype(FONT_REGULAR, PARTY_DEX_FONT_SIZE)
     party_slot_badge_font = ImageFont.truetype(FONT_BOLD, PARTY_DEX_FONT_SIZE)
     party_level_badge_font = ImageFont.truetype(FONT_BOLD, PARTY_LEVEL_FONT_SIZE)
+    party_exp_font = ImageFont.truetype(FONT_REGULAR, PARTY_EXP_FONT_SIZE)
     section_label_font = ImageFont.truetype(FONT_BOLD, 15)
 
     # --- Header / identity area ------------------------------------
@@ -793,7 +816,7 @@ def render_profile_panel(data: ProfileCardData) -> bytes:
         slot_data = slots_in_order[i] if i < len(slots_in_order) else None
         _draw_party_tile(
             card, draw, box, slot_data, party_name_font, party_dex_font,
-            party_slot_badge_font, party_level_badge_font,
+            party_slot_badge_font, party_level_badge_font, party_exp_font,
         )
 
     buf = io.BytesIO()

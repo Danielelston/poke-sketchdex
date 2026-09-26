@@ -184,7 +184,7 @@ class Collection(commands.Cog):
     async def release(self, interaction: discord.Interaction, slot: int, active: bool = False) -> None:
         try:
             async with db.session() as s:
-                path = await pokebox.release_mon(s, interaction.user.id, slot, active)
+                path, mon_level = await pokebox.release_mon(s, interaction.user.id, slot, active)
                 await s.commit()
         except pokebox.CatchError as exc:
             await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
@@ -192,7 +192,10 @@ class Collection(commands.Cog):
 
         pokebox.delete_cached_file(path)
         kind = "active" if active else "box"
-        await interaction.response.send_message(f"🕊️ Released the mon in {kind} slot {slot}.", ephemeral=True)
+        msg = f"🕊️ Released the mon in {kind} slot {slot}."
+        if mon_level > 10:
+            msg = f"🕊️ Released the Lv. {mon_level} mon in {kind} slot {slot}."
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(name="pokeballs", description="Show your (or someone's) pokeball balance.")
     @app_commands.describe(user="Whose balance to show (default: you)")

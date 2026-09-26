@@ -295,7 +295,7 @@ async def main() -> None:
     target = box[0]
     assert os.path.exists(target.cached_image_path), target.cached_image_path
     async with db.session() as s:
-        released_path = await pokebox.release_mon(s, pb_uid, target.slot, is_active=False)
+        released_path, _released_level = await pokebox.release_mon(s, pb_uid, target.slot, is_active=False)
         await s.commit()
     pokebox.delete_cached_file(released_path)
     assert not os.path.exists(released_path), released_path
