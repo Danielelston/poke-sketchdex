@@ -261,11 +261,19 @@ class FormsButtonView(discord.ui.View):
 
     @discord.ui.button(label="View Alt Forms", style=discord.ButtonStyle.secondary, custom_id=FORMS_BUTTON_CUSTOM_ID)
     async def view_alt_forms(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        # Defer immediately: everything below is DB I/O plus a possible
+        # live PokeAPI fetch on cache miss (see pokeapi.get_species_forms),
+        # either of which can blow past Discord's 3-second interaction
+        # response window and surface as "The application didn't respond
+        # in time" even though the bot is still working. Deferring buys the
+        # full 15-minute followup window instead.
+        await interaction.response.defer(ephemeral=True)
+
         message_id = interaction.message.id if interaction.message is not None else None
         resolved = await _resolve_species_for_message(message_id)
         if resolved is None:
             log.warning("view_alt_forms: no DailyPokemon/WildEncounter row matches message_id=%s", message_id)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Couldn't find this post's Pokemon data (it may be too old).", ephemeral=True
             )
             return
@@ -274,7 +282,7 @@ class FormsButtonView(discord.ui.View):
         forms = await interaction.client.api.get_species_forms(dex_no)  # type: ignore[attr-defined]
         pages = _build_form_pages(dex_no, name, forms, shiny)
         if not pages:
-            await interaction.response.send_message("No alternate forms available for this Pokemon.", ephemeral=True)
+            await interaction.followup.send("No alternate forms available for this Pokemon.", ephemeral=True)
             return
 
-        await interaction.response.send_message(embed=pages[0], view=_FormsPaginatorView(pages), ephemeral=True)
+        await interaction.followup.send(embed=pages[0], view=_FormsPaginatorView(pages), ephemeral=True)
