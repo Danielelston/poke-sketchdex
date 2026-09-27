@@ -3209,6 +3209,125 @@ async def main() -> None:
     assert str(leveling.MON_EXP_SUPER_LIKE) in sl_help_mon_exp_text, sl_help_mon_exp_text
     print("super like help OK: /help EXP breakdown reflects live EXP_PER_SUPER_LIKE / MON_EXP_SUPER_LIKE")
 
+    # --- /party & /box ephemeral-by-default coverage (Ephemeral Party & Box
+    # Views Plan). Drives the real cog command callbacks with a mocked
+    # Interaction (same pattern as the /rename tests above), asserting the
+    # `ephemeral` kwarg passed to interaction.response.send_message rather
+    # than a real Discord round-trip. The public path's 10-minute auto-delete
+    # is never awaited for real: asyncio.create_task is monkeypatched on the
+    # collection module to capture that scheduling happened (and to close the
+    # unawaited coroutine cleanly) instead of letting the 600s sleep run.
+    import pokesketch.cogs.collection as _collection_mod
+
+    class _FakePartyBoxMessage:
+        def __init__(self, msg_id: int):
+            self.id = msg_id
+            self.deleted = False
+
+        async def delete(self):
+            self.deleted = True
+
+    class _FakePartyBoxResponse:
+        def __init__(self):
+            self.sent: dict | None = None
+
+        async def send_message(self, content=None, **kwargs):
+            self.sent = {"content": content, **kwargs}
+
+    class _FakePartyBoxUser:
+        def __init__(self, uid: int):
+            self.id = uid
+            self.display_name = f"user-{uid}"
+
+    class _FakePartyBoxInteraction:
+        def __init__(self, user_id: int):
+            self.user = _FakePartyBoxUser(user_id)
+            self.response = _FakePartyBoxResponse()
+            self._message = _FakePartyBoxMessage(msg_id=id(self))
+
+        async def original_response(self):
+            return self._message
+
+    # rename_uid already has a full party (6 active) + box (14 boxed) from the
+    # /rename fixture above, so it doubles as the non-empty /party and /box
+    # fixture here — no re-seeding needed. A fresh user with zero catches
+    # covers the always-ephemeral empty-state branches.
+    empty_collection_uid = 8001
+
+    # Non-empty /party: ephemeral by default.
+    party_default_interaction = _FakePartyBoxInteraction(rename_uid)
+    await collection_cog.party.callback(collection_cog, party_default_interaction)
+    assert party_default_interaction.response.sent.get("ephemeral") is True, party_default_interaction.response.sent
+
+    # Swap the `asyncio` name bound inside the collection module's own
+    # namespace (NOT asyncio.create_task on the real shared module — that
+    # would also break SQLAlchemy's own task usage on this same event loop).
+    scheduled_tasks: list = []
+    real_asyncio_ns = _collection_mod.asyncio
+
+    class _FakeAsyncioNamespace:
+        sleep = staticmethod(asyncio.sleep)
+
+        @staticmethod
+        def create_task(coro):
+            scheduled_tasks.append(coro)
+            coro.close()
+            return None
+
+    _collection_mod.asyncio = _FakeAsyncioNamespace()
+    try:
+        # Non-empty /party public:true: posts visibly and schedules auto-delete.
+        party_public_interaction = _FakePartyBoxInteraction(rename_uid)
+        await collection_cog.party.callback(collection_cog, party_public_interaction, public=True)
+        assert party_public_interaction.response.sent.get("ephemeral") is False, (
+            party_public_interaction.response.sent
+        )
+        assert len(scheduled_tasks) == 1, scheduled_tasks
+
+        # Empty /party stays ephemeral even with public=True, and schedules nothing.
+        empty_party_interaction = _FakePartyBoxInteraction(empty_collection_uid)
+        await collection_cog.party.callback(collection_cog, empty_party_interaction, public=True)
+        assert empty_party_interaction.response.sent.get("ephemeral") is True, (
+            empty_party_interaction.response.sent
+        )
+        assert "doesn't have any active party members yet" in empty_party_interaction.response.sent["content"], (
+            empty_party_interaction.response.sent
+        )
+        assert len(scheduled_tasks) == 1, "empty-party branch must not schedule an auto-delete task"
+        print(
+            "party OK: ephemeral by default, public:true posts visibly and schedules an "
+            "auto-delete task, empty-party stays ephemeral even with public=True"
+        )
+
+        # Non-empty /box: ephemeral by default.
+        box_default_interaction = _FakePartyBoxInteraction(rename_uid)
+        await collection_cog.box.callback(collection_cog, box_default_interaction)
+        assert box_default_interaction.response.sent.get("ephemeral") is True, box_default_interaction.response.sent
+
+        # Non-empty /box public:true (multi-page, since rename_uid has 14 boxed
+        # mons / BOX_PAGE_SIZE=10 → 2 pages, exercising the paginator branch
+        # too): posts visibly and schedules auto-delete.
+        box_public_interaction = _FakePartyBoxInteraction(rename_uid)
+        await collection_cog.box.callback(collection_cog, box_public_interaction, public=True)
+        assert box_public_interaction.response.sent.get("ephemeral") is False, box_public_interaction.response.sent
+        assert len(scheduled_tasks) == 2, scheduled_tasks
+
+        # Empty /box stays ephemeral even with public=True, and schedules nothing.
+        empty_box_interaction = _FakePartyBoxInteraction(empty_collection_uid)
+        await collection_cog.box.callback(collection_cog, empty_box_interaction, public=True)
+        assert empty_box_interaction.response.sent.get("ephemeral") is True, empty_box_interaction.response.sent
+        assert "storage box is empty" in empty_box_interaction.response.sent["content"], (
+            empty_box_interaction.response.sent
+        )
+        assert len(scheduled_tasks) == 2, "empty-box branch must not schedule an auto-delete task"
+        print(
+            "box OK: ephemeral by default, public:true posts visibly (including the "
+            "multi-page/paginator path) and schedules an auto-delete task, empty-box stays "
+            "ephemeral even with public=True"
+        )
+    finally:
+        _collection_mod.asyncio = real_asyncio_ns
+
     print("ALL SMOKE TESTS PASSED")
 
 
