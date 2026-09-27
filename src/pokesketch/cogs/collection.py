@@ -274,10 +274,10 @@ class Collection(commands.Cog):
     @app_commands.command(name="rename", description="Rename (or clear the nickname of) one of your caught mons.")
     @app_commands.describe(
         mon="Which caught mon to rename",
-        nickname="New nickname (max 12 chars) — leave blank to clear it",
+        nickname="New nickname (max 12 chars) — omit this option entirely to clear it",
     )
     @app_commands.autocomplete(mon=_rename_mon_autocomplete)
-    async def rename(self, interaction: discord.Interaction, mon: str, nickname: str) -> None:
+    async def rename(self, interaction: discord.Interaction, mon: str, nickname: str | None = None) -> None:
         try:
             mon_id = int(mon)
         except ValueError:

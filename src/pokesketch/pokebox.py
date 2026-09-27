@@ -479,7 +479,7 @@ async def release_mon(s, user_id: int, slot: int, is_active: bool) -> tuple[str,
     return path, mon_level
 
 
-async def rename_mon(s, user_id: int, mon_id: int, raw_nickname: str) -> CaughtMon:
+async def rename_mon(s, user_id: int, mon_id: int, raw_nickname: str | None) -> CaughtMon:
     """Rename or clear the nickname of a mon the caller owns.
 
     Always re-resolves mon_id against CaughtMon.id == mon_id AND
@@ -488,9 +488,17 @@ async def rename_mon(s, user_id: int, mon_id: int, raw_nickname: str) -> CaughtM
     arbitrary id into the field (same "always re-validate server-side" rule
     /catch's target param already follows). Raises CatchError on any failure
     (wrong owner, deleted/released mon, or a nickname sanitize_nickname
-    rejects) rather than returning None silently. An empty raw_nickname
-    clears the nickname to None via sanitize_nickname's existing "blank
-    after strip -> None" behavior, unchanged.
+    rejects) rather than returning None silently.
+
+    raw_nickname is None (the caller omitted the optional Discord param) ->
+    clears the nickname to None directly. Discord will not submit a
+    *required* string option left blank (the client refuses with "this
+    option is required" before the interaction ever reaches the bot), so
+    clearing is only reachable by making the option optional and treating
+    "omitted" as "clear" -- an empty string can still reach here from a
+    caller that hand-types zero characters into an optional field, and is
+    handled the same way via sanitize_nickname's existing "blank after
+    strip -> None" behavior.
     """
     mon = (
         await s.execute(
@@ -501,7 +509,7 @@ async def rename_mon(s, user_id: int, mon_id: int, raw_nickname: str) -> CaughtM
         raise CatchError(
             "That mon isn't yours to rename — it may have been released or belong to someone else."
         )
-    mon.nickname = sanitize_nickname(raw_nickname)
+    mon.nickname = None if raw_nickname is None else sanitize_nickname(raw_nickname)
     return mon
 
 
