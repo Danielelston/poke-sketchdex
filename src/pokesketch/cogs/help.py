@@ -124,11 +124,8 @@ class Help(commands.Cog):
             description=(
                 "Every day the bot posts a Pokémon reference and pings the sketcher role. "
                 "Sketch it, post your art in that day's thread with `/submit`, and react 👍 "
-                "on entries you like.\n\n"
-                "Each week, players also vote in two stages (category, then a specific choice) "
-                "for a wild-encounter theme. Once that's decided, a fresh wild-encounter thread "
-                "gets posted daily alongside the main challenge — its own Pokémon, its own thread "
-                "each day. `/submit` works there too."
+                "on entries you like — see **🎲 Weekly vote & wild encounters** below for the "
+                "other daily thread you can sketch in."
             ),
             color=0x5865F2,
         )
@@ -147,24 +144,42 @@ class Help(commands.Cog):
         )
         _add_guarded_field(
             embed,
+            "🎲 Weekly vote & wild encounters",
+            "Each week, a poll asks which **category** this week's wild-encounter theme "
+            "comes from (Location / Type / Event / Habitat / Generation). The next day, a "
+            "second poll narrows it to a specific choice within that category.\n\n"
+            "Once that's resolved, a fresh **wild-encounter thread** gets posted daily "
+            "alongside the main challenge — its own Pokémon (drawn from the week's theme "
+            "pool), its own thread each day. `/submit` works there too, for bonus EXP (see "
+            "⭐ above).\n\n"
+            "-# Wild-encounter threads have **no grace-period backfill**: `/submit` there "
+            "only counts through the next guild-local midnight, unlike daily threads (see "
+            "⏳ below). Admins can also author custom Events with their own dex lists — see "
+            "`/help-admin`.",
+        )
+        _add_guarded_field(
+            embed,
             "📦 Catch & collection",
             "`/catch [target] [nickname]` — spend a pokeball to catch an eligible sketch into "
             "your party/storage; pick from the autocomplete list or leave blank for your most "
             "recent one\n"
             "-# Caught images are stored downsized (max 1080x1080px) to keep storage bounded\n"
-            "`/party [user]` — your 6 active party slots\n"
-            "`/box [user]` — paginated view of your storage box\n"
+            "`/party [user] [public]` — your 6 active party slots (ephemeral to you by "
+            "default; `public` posts it to the channel instead, auto-deleting in 10 min)\n"
+            "`/box [user] [public]` — paginated view of your storage box (same "
+            "ephemeral/public behavior as `/party`)\n"
             "`/swap <box_slot> <active_slot>` — swap a boxed mon into your active party\n"
             "`/release <slot> [active]` — release a caught mon and free its slot\n"
-            "`/rename <mon> <nickname>` — rename (or clear the nickname of) a caught mon\n"
+            "`/rename <mon> [nickname]` — rename (or, if left blank, clear the nickname of) a caught mon\n"
             "`/pokeballs [user]` — your pokeball balance and next weekly grant",
         )
         _add_guarded_field(
             embed,
             "⏳ Submit vs. catch windows",
-            "Submitting and catching run on separate clocks — a thread often stays open "
+            "Submitting and catching run on separate clocks — a daily thread often stays open "
             "for `/submit` well after a sketch's own catch window has closed. Check a "
-            "thread's opening post or your `/submit` confirmation for the current windows.",
+            "thread's opening post or your `/submit` confirmation for the current windows. "
+            "Wild-encounter threads work differently — see 🎲 above.",
         )
         _add_guarded_field(
             embed,
@@ -175,7 +190,7 @@ class Help(commands.Cog):
             "gym leader's HP while a gym event is active — see `/help-admin` for `/gym start`.",
         )
         _add_guarded_field(embed, "🛠️ Server admin?", "See `/help-admin` for setup and moderation commands.")
-        embed.set_footer(text="PokeSketchDex • one Pokemon a day")
+        embed.set_footer(text="PokeSketchDex • Sketch 'em all")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(
@@ -193,7 +208,7 @@ class Help(commands.Cog):
         )
         for name, value in _admin_field_groups():
             _add_guarded_field(embed, name, value)
-        embed.set_footer(text="PokeSketchDex • one Pokemon a day")
+        embed.set_footer(text="PokeSketchDex • Sketch 'em all")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
