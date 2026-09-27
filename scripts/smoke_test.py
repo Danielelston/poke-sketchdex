@@ -2720,10 +2720,18 @@ async def main() -> None:
     assert rename_interaction.response.sent.get("ephemeral") is True, rename_interaction.response.sent
     print("rename OK: nickname updated, confirmation shows new display name")
 
-    # Successful clear: empty-string nickname reverts to species-only display.
+    # Successful clear: omitting the now-optional nickname param reverts to
+    # species-only display. `nickname` is optional (not empty-string-clears)
+    # because Discord refuses to submit a *required* string option left
+    # blank ("this option is required") before the interaction ever reaches
+    # the bot -- confirmed via live manual check in the test guild -- so
+    # "omitted" is the only reachable clear signal. A hand-typed empty
+    # string in the optional field is exercised separately below and must
+    # behave identically (still clears, via sanitize_nickname's existing
+    # "blank after strip -> None" behavior).
     clear_interaction = _FakeCollectionInteraction(rename_uid)
     await collection_cog.rename.callback(
-        collection_cog, clear_interaction, mon=str(rename_target.id), nickname=""
+        collection_cog, clear_interaction, mon=str(rename_target.id)
     )
     async with db.session() as s:
         cleared = await s.get(db.CaughtMon, rename_target.id)
@@ -2733,7 +2741,23 @@ async def main() -> None:
         == f"✏️ Renamed to **{_collection_display_name(cleared)}**."
     ), clear_interaction.response.sent
     assert "(" not in clear_interaction.response.sent["content"], clear_interaction.response.sent
-    print("rename clear OK: empty-string nickname clears back to species-only display")
+    print("rename clear OK: omitting the optional nickname param clears back to species-only display")
+
+    # Re-set a nickname, then confirm a hand-typed empty string in the
+    # (still-present, just optional) field clears it the same way omission
+    # does -- Discord CAN deliver "" for an optional string option even
+    # though it refuses to for a required one.
+    async with db.session() as s:
+        await pokebox.rename_mon(s, rename_uid, rename_target.id, "Sparky")
+        await s.commit()
+    clear_empty_interaction = _FakeCollectionInteraction(rename_uid)
+    await collection_cog.rename.callback(
+        collection_cog, clear_empty_interaction, mon=str(rename_target.id), nickname=""
+    )
+    async with db.session() as s:
+        cleared_via_empty = await s.get(db.CaughtMon, rename_target.id)
+    assert cleared_via_empty.nickname is None, cleared_via_empty.nickname
+    print("rename clear OK: a hand-typed empty string in the optional field also clears")
 
     # Wrong-owner rejection: a mon id belonging to another user fails with a
     # plain ephemeral error, no exception surfaced, no mutation.
