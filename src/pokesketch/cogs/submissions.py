@@ -218,6 +218,21 @@ class Submissions(commands.Cog):
         # Pokédex (free, automatic, insert-if-not-exists).
         await pokebox.record_pokebox_scan(s, uid, daily.dex_no, sub.id)
 
+        # Super likes: every accepted submission grants its author +1, even a
+        # same-day resubmission — regardless of streak/upvotes/first-time-vs-
+        # update (see Super Likes on Submissions Plan design doc).
+        await pokebox.grant_super_like(s, uid)
+
+        # Attach the persistent "⭐ Super Like" button now that sub.id is known
+        # (it isn't yet at the earlier channel.send() call above, for a
+        # brand-new submission — see the design doc's Card 4/5 display note).
+        # Deferred import: ui -> superlike -> cogs.submissions is a real
+        # import cycle, so this can't be a module-level import here.
+        from .. import ui as _ui
+
+        super_like_button = _ui.SuperLikeButton.for_submission(sub.id, wild=False)
+        await posted.edit(view=discord.ui.View(timeout=None).add_item(super_like_button))
+
         exp_msg = ""
         gym_result = None
         if first_time:
@@ -275,6 +290,21 @@ class Submissions(commands.Cog):
             sub = existing
 
         await pokebox.record_pokebox_scan(s, uid, wild_encounter.dex_no, None)
+
+        # Super likes: every accepted submission grants its author +1, even a
+        # same-day resubmission — regardless of streak/upvotes/first-time-vs-
+        # update (see Super Likes on Submissions Plan design doc).
+        await pokebox.grant_super_like(s, uid)
+
+        # Attach the persistent "⭐ Super Like" button now that sub.id is known
+        # (it isn't yet at the earlier channel.send() call above, for a
+        # brand-new submission — see the design doc's Card 4/5 display note).
+        # Deferred import: ui -> superlike -> cogs.submissions is a real
+        # import cycle, so this can't be a module-level import here.
+        from .. import ui as _ui
+
+        super_like_button = _ui.SuperLikeButton.for_submission(sub.id, wild=True)
+        await posted.edit(view=discord.ui.View(timeout=None).add_item(super_like_button))
 
         exp_msg = ""
         gym_result = None

@@ -31,6 +31,7 @@ from .db import (
     PokeballWallet,
     PokeBox,
     Submission,
+    SuperLikeWallet,
     WildEncounterSubmission,
 )
 from .formatting import species_display_name
@@ -100,6 +101,32 @@ async def get_or_create_wallet(s, user_id: int) -> PokeballWallet:
         s.add(wallet)
         await s.flush()
     return wallet
+
+
+async def get_or_create_super_like_wallet(s, user_id: int) -> SuperLikeWallet:
+    """Lazily create a SuperLikeWallet row, mirroring _get_or_create_user.
+
+    Unlike get_or_create_wallet (PokeballWallet), there is no starter grant —
+    a brand-new player has a balance of 0 until their first accepted
+    submission, per the Super Likes on Submissions Plan design doc.
+    """
+    wallet = await s.get(SuperLikeWallet, user_id)
+    if wallet is None:
+        wallet = SuperLikeWallet(user_id=user_id, balance=0)
+        s.add(wallet)
+        await s.flush()
+    return wallet
+
+
+async def grant_super_like(s, user_id: int) -> None:
+    """+1 SuperLikeWallet.balance for an accepted submission's author.
+
+    Called for every accepted /submit (daily or wild-encounter), regardless
+    of streak, upvotes, or first-time-vs-update — see the Super Likes on
+    Submissions Plan design doc's earn-rate decision.
+    """
+    wallet = await get_or_create_super_like_wallet(s, user_id)
+    wallet.balance += 1
 
 
 async def record_pokebox_scan(s, user_id: int, dex_no: int, submission_id: int | None) -> None:

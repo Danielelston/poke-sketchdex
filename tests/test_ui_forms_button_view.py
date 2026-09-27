@@ -114,6 +114,9 @@ def test_registered_exactly_once_via_bot_add_view(monkeypatch):
         def add_view(self, view) -> None:
             registered.append(view)
 
+        def add_dynamic_items(self, *items) -> None:
+            pass
+
     fake_bot = _FakeBot()
     bot.PokeSketchDexBot._register_persistent_views(fake_bot)
 
