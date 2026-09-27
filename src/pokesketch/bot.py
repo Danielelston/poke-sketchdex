@@ -87,6 +87,21 @@ class PokeSketchDexBot(commands.Bot):
         if not hasattr(self, "forms_button_view"):
             self.forms_button_view = FormsButtonView()
         self.add_view(self.forms_button_view)
+        # TEMP DIAGNOSTIC: dump what discord.py's internal view store actually
+        # holds after add_view(), to confirm the button's (component_type,
+        # custom_id) key is really registered under the persistent (None)
+        # message_id bucket the dispatcher falls back to. Guarded because
+        # test doubles for `self` (_FakeBot) have no `_connection`.
+        store = getattr(self, "_connection", None)
+        if store is not None:
+            store = store._view_store
+            log.info(
+                "persistent view registered: view_id=%s is_persistent=%s keys_at_None=%s all_message_id_keys=%s",
+                self.forms_button_view.id,
+                self.forms_button_view.is_persistent(),
+                list(store._views.get(None, {}).keys()),
+                list(store._views.keys()),
+            )
 
     async def _sync_all_joined_guilds(self) -> None:
         """Sync slash commands guild-scoped only, to every guild we're in.
