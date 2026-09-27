@@ -34,5 +34,5 @@ def daily_embed(ref: PokemonRef, shiny: bool, images: list[str]) -> discord.Embe
         embed.set_image(url=images[0])
     if len(images) > 1:
         embed.set_thumbnail(url=images[1])
-    embed.set_footer(text="PokeSketchDex • one Pokemon a day")
+    embed.set_footer(text="PokeSketchDex • Sketch 'em all")
     return embed

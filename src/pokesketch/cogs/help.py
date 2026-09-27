@@ -190,7 +190,7 @@ class Help(commands.Cog):
             "gym leader's HP while a gym event is active — see `/help-admin` for `/gym start`.",
         )
         _add_guarded_field(embed, "🛠️ Server admin?", "See `/help-admin` for setup and moderation commands.")
-        embed.set_footer(text="PokeSketchDex • one Pokemon a day")
+        embed.set_footer(text="PokeSketchDex • Sketch 'em all")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(
@@ -208,7 +208,7 @@ class Help(commands.Cog):
         )
         for name, value in _admin_field_groups():
             _add_guarded_field(embed, name, value)
-        embed.set_footer(text="PokeSketchDex • one Pokemon a day")
+        embed.set_footer(text="PokeSketchDex • Sketch 'em all")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
