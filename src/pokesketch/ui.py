@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import discord
 from sqlalchemy import select
 
-from . import db
+from . import db, leveling, superlike
 from .formatting import species_display_name
 from .pokeapi import SpeciesForms
 
@@ -296,3 +297,95 @@ class FormsButtonView(discord.ui.View):
         except Exception:
             log.exception("view_alt_forms: failed after defer for message_id=%s", message_id)
             raise
+
+
+# custom_id scheme: "superlike:<kind>:<id>" — kind is "s" (daily Submission)
+# or "w" (WildEncounterSubmission), mirroring pokebox.encode_catch_target's
+# same s/w prefix convention for the same dual-source-table problem. The
+# regex is deliberately strict ([sw] / digits-only id) so a future code
+# change that alters this scheme fails a still-open old button's clicks
+# loudly (SuperLikeButton.from_custom_id simply won't match, and Discord
+# routes it nowhere) rather than silently mis-parsing a stale custom_id —
+# see the design doc's "malformed custom_id is a silent dead button, not a
+# crash" constraint, which this is the first line of defense against.
+SUPER_LIKE_CUSTOM_ID_TEMPLATE = r"superlike:(?P<kind>[sw]):(?P<target_id>[0-9]+)"
+
+
+class SuperLikeButton(discord.ui.DynamicItem[discord.ui.Button], template=SUPER_LIKE_CUSTOM_ID_TEMPLATE):
+    """Persistent "⭐ Super Like" button attached to a single submission post.
+
+    Unlike `FormsButtonView` (one static `custom_id` shared by every
+    message) this is a `discord.ui.DynamicItem`: each instance's
+    `custom_id` encodes which submission it belongs to
+    (`superlike:{s,w}:{id}`), and the *class* — not any one instance — is
+    registered exactly once via `bot.add_dynamic_items(SuperLikeButton)` in
+    `PokeSketchDexBot.setup_hook` (see `bot.py`). Discord.py reconstructs a
+    fresh instance per click via `from_custom_id`, matching the regex
+    against whatever `custom_id` the clicked component actually carries —
+    so this keeps routing correctly to *any* still-open submission post
+    across bot restarts, with no per-message `add_view(..., message_id=...)`
+    re-registration needed (see the design doc's persistent-view
+    constraint).
+
+    All click-time validation (balance, self, duplicate, grace-window) and
+    the actual grant math live in `superlike.give_super_like` — this class
+    is Discord-plumbing only: parse the custom_id, defer, call the
+    business logic, translate the result (or a `SuperLikeError`) into an
+    ephemeral reply.
+    """
+
+    def __init__(self, kind: str, target_id: int) -> None:
+        super().__init__(
+            discord.ui.Button(
+                label="⭐ Super Like",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"superlike:{kind}:{target_id}",
+            )
+        )
+        self.kind = kind
+        self.target_id = target_id
+
+    @classmethod
+    def for_submission(cls, submission_id: int, *, wild: bool) -> SuperLikeButton:
+        """Build the button to attach to a freshly-posted submission message —
+        the one construction path `cogs/submissions.py` (Card 4/5's display
+        wiring) should use, so callers never hand-format the custom_id
+        themselves."""
+        return cls("w" if wild else "s", submission_id)
+
+    @classmethod
+    async def from_custom_id(
+        cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match[str], /
+    ) -> SuperLikeButton:
+        return cls(match["kind"], int(match["target_id"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        # Defer immediately: give_super_like does DB I/O (and, on the
+        # mon-EXP side, nothing external, but the same 3-second interaction
+        # window applies regardless) — same rationale as
+        # FormsButtonView.view_alt_forms's defer-first pattern above.
+        await interaction.response.defer(ephemeral=True)
+        wild = self.kind == "w"
+        try:
+            async with db.session() as s:
+                receiver_id, _mon_exp_awarded = await superlike.give_super_like(
+                    s, giver_id=interaction.user.id, wild=wild, target_id=self.target_id
+                )
+                await s.commit()
+        except superlike.SuperLikeError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        except Exception:
+            log.exception(
+                "superlike: give_super_like failed for giver_id=%s wild=%s target_id=%s",
+                interaction.user.id, wild, self.target_id,
+            )
+            await interaction.followup.send(
+                "Something went wrong giving that super like — nothing was changed.", ephemeral=True
+            )
+            return
+
+        await interaction.followup.send(
+            f"⭐ Super like given! <@{receiver_id}> gets +{leveling.EXP_PER_SUPER_LIKE} EXP.",
+            ephemeral=True,
+        )
