@@ -218,6 +218,11 @@ class Submissions(commands.Cog):
         # Pokédex (free, automatic, insert-if-not-exists).
         await pokebox.record_pokebox_scan(s, uid, daily.dex_no, sub.id)
 
+        # Super likes: every accepted submission grants its author +1, even a
+        # same-day resubmission — regardless of streak/upvotes/first-time-vs-
+        # update (see Super Likes on Submissions Plan design doc).
+        await pokebox.grant_super_like(s, uid)
+
         exp_msg = ""
         gym_result = None
         if first_time:
@@ -275,6 +280,11 @@ class Submissions(commands.Cog):
             sub = existing
 
         await pokebox.record_pokebox_scan(s, uid, wild_encounter.dex_no, None)
+
+        # Super likes: every accepted submission grants its author +1, even a
+        # same-day resubmission — regardless of streak/upvotes/first-time-vs-
+        # update (see Super Likes on Submissions Plan design doc).
+        await pokebox.grant_super_like(s, uid)
 
         exp_msg = ""
         gym_result = None
