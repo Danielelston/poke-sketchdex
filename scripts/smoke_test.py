@@ -589,6 +589,7 @@ async def main() -> None:
             self.attachments = [type("Attachment", (), {"url": url})()]
             self._thread = thread
             self.created_threads: list[dict] = []
+            self.view = None
 
         async def add_reaction(self, emoji):
             pass
@@ -596,6 +597,11 @@ async def main() -> None:
         async def create_thread(self, **kwargs):
             self.created_threads.append(kwargs)
             return self._thread
+
+        async def edit(self, *args, **kwargs):
+            # Card 4/5 attaches the Super Like button via message.edit()
+            # once sub.id is known -- see cogs/submissions.py.
+            self.view = kwargs.get("view")
 
     class _FakeThread:
         def __init__(self, thread_id: int):
@@ -2842,6 +2848,366 @@ async def main() -> None:
         "active-then-box ascending ordering holds, the 25-choice cap truncates box slot 20, "
         "and it's recoverable via the substring filter"
     )
+
+    # --- Super Likes on Submissions (Card 5/5: verify) ------------------
+    # See Design/Super Likes on Submissions Plan.md's acceptance criteria.
+    # Earn hook (Card 2/5) and spend flow (Card 3/5) are exercised here via
+    # their real production entry points -- _submit_to_daily /
+    # _submit_to_wild_encounter for earning, superlike.give_super_like for
+    # spending -- not by poking pokebox helpers directly, so a regression in
+    # either hook's wiring shows up here.
+    import re as _sl_re
+
+    from pokesketch import superlike as _superlike
+    from pokesketch.ui import SUPER_LIKE_CUSTOM_ID_TEMPLATE, SuperLikeButton
+
+    sl_gid2 = 500
+    sl_author_uid, sl_giver_uid, sl_self_uid = 50001, 50002, 50003
+
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=sl_gid2, grace_period_days=7))
+        s.add(db.DailyPokemon(guild_id=sl_gid2, local_date=today, dex_no=1, name="bulbasaur"))
+        await s.commit()
+        sl_daily = (
+            await s.execute(select(db.DailyPokemon).where(db.DailyPokemon.guild_id == sl_gid2))
+        ).scalar_one()
+
+    # Brand-new player: balance is 0 until their first accepted submission.
+    async with db.session() as s:
+        fresh_wallet = await pokebox.get_or_create_super_like_wallet(s, sl_author_uid)
+        await s.commit()
+    assert fresh_wallet.balance == 0, fresh_wallet.balance
+    print("super like earn OK: a brand-new player's wallet starts at balance 0")
+
+    # Earn-on-submit, daily: an accepted /submit grants exactly +1 balance.
+    async with db.session() as s:
+        sl_daily_row = await s.get(db.DailyPokemon, sl_daily.id)
+        await subs_cog._submit_to_daily(
+            s, sl_daily_row, _FakeThread(95001), _FakeAttachment(), sl_gid2, sl_author_uid, "<@50001>"
+        )
+        await s.commit()
+    async with db.session() as s:
+        sl_wallet_after_daily = await s.get(db.SuperLikeWallet, sl_author_uid)
+    assert sl_wallet_after_daily.balance == 1, sl_wallet_after_daily.balance
+    async with db.session() as s:
+        sl_daily_sub = (
+            await s.execute(
+                select(db.Submission).where(
+                    db.Submission.guild_id == sl_gid2, db.Submission.user_id == sl_author_uid
+                )
+            )
+        ).scalar_one()
+        sl_daily_sub_id = sl_daily_sub.id
+    print("super like earn OK: an accepted daily /submit grants exactly +1 SuperLikeWallet.balance")
+
+    # Earn-on-submit, wild-encounter: same +1 grant, tracked on the SAME
+    # global wallet (not a second, per-source balance).
+    sl_wild_gid = 501
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=sl_wild_gid, grace_period_days=7))
+        vote_for_sl = db.WeeklyVote(guild_id=sl_wild_gid, iso_week="2026-W40")
+        s.add(vote_for_sl)
+        await s.flush()
+        sl_encounter = db.WildEncounter(
+            guild_id=sl_wild_gid, weekly_vote_id=vote_for_sl.id, local_date=today, dex_no=4, name="charmander"
+        )
+        s.add(sl_encounter)
+        await s.commit()
+        sl_encounter_id = sl_encounter.id
+
+    async with db.session() as s:
+        sl_encounter_row = await s.get(db.WildEncounter, sl_encounter_id)
+        await subs_cog._submit_to_wild_encounter(
+            s, sl_encounter_row, _FakeThread(95002), _FakeAttachment(), sl_wild_gid, sl_author_uid, "<@50001>", today
+        )
+        await s.commit()
+    async with db.session() as s:
+        sl_wallet_after_wild = await s.get(db.SuperLikeWallet, sl_author_uid)
+        sl_wild_sub = (
+            await s.execute(
+                select(db.WildEncounterSubmission).where(
+                    db.WildEncounterSubmission.wild_encounter_id == sl_encounter_id,
+                    db.WildEncounterSubmission.user_id == sl_author_uid,
+                )
+            )
+        ).scalar_one()
+        sl_wild_sub_id = sl_wild_sub.id
+    assert sl_wallet_after_wild.balance == 2, sl_wallet_after_wild.balance  # global: 1 (daily) + 1 (wild)
+    print(
+        "super like earn OK: an accepted wild-encounter /submit also grants +1, on the SAME "
+        f"global wallet (balance now {sl_wallet_after_wild.balance})"
+    )
+
+    # Zero-balance rejection: sl_giver_uid has never submitted -> balance 0,
+    # so a click is rejected ephemerally and nothing is decremented/granted.
+    async with db.session() as s:
+        try:
+            await _superlike.give_super_like(s, giver_id=sl_giver_uid, wild=False, target_id=sl_daily_sub_id)
+            raise AssertionError("expected SuperLikeError for a zero-balance giver")
+        except _superlike.SuperLikeError as exc:
+            assert "no super likes" in str(exc).lower(), exc
+        await s.rollback()
+    async with db.session() as s:
+        zero_wallet = await pokebox.get_or_create_super_like_wallet(s, sl_giver_uid)
+    assert zero_wallet.balance == 0, zero_wallet.balance
+    print("super like spend OK: zero-balance giver rejected ephemerally, balance stays 0")
+
+    # Self-block: the author can't super-like their own submission, even
+    # though they now have balance to spend.
+    async with db.session() as s:
+        try:
+            await _superlike.give_super_like(s, giver_id=sl_author_uid, wild=False, target_id=sl_daily_sub_id)
+            raise AssertionError("expected SuperLikeError for a self-super-like")
+        except _superlike.SuperLikeError as exc:
+            assert "own submission" in str(exc).lower(), exc
+        await s.rollback()
+    async with db.session() as s:
+        author_wallet_unchanged = await s.get(db.SuperLikeWallet, sl_author_uid)
+    assert author_wallet_unchanged.balance == 2, author_wallet_unchanged.balance
+    print("super like spend OK: self-super-like rejected ephemerally, balance unchanged")
+
+    # Give sl_giver_uid a balance of 2 (one to spend on the daily target,
+    # one to spend on the wild-encounter target further below).
+    async with db.session() as s:
+        giver_wallet = await pokebox.get_or_create_super_like_wallet(s, sl_giver_uid)
+        giver_wallet.balance = 2
+        await s.commit()
+
+    # Successful grant math: balance -1, receiver +EXP_PER_SUPER_LIKE player
+    # EXP logged as an ExpEvent of type "super_like_received", no caught mon
+    # yet -> zero mon-EXP side effects and no error.
+    async with db.session() as s:
+        receiver_id, mon_exp_awarded_none = await _superlike.give_super_like(
+            s, giver_id=sl_giver_uid, wild=False, target_id=sl_daily_sub_id
+        )
+        await s.commit()
+    assert receiver_id == sl_author_uid, receiver_id
+    assert mon_exp_awarded_none == 0, mon_exp_awarded_none  # no CaughtMon sourced from this submission yet
+    async with db.session() as s:
+        giver_wallet_after = await s.get(db.SuperLikeWallet, sl_giver_uid)
+        sl_exp_events = (
+            await s.execute(
+                select(db.ExpEvent).where(
+                    db.ExpEvent.guild_id == sl_gid2,
+                    db.ExpEvent.user_id == sl_author_uid,
+                    db.ExpEvent.type == "super_like_received",
+                )
+            )
+        ).scalars().all()
+    assert giver_wallet_after.balance == 1, giver_wallet_after.balance
+    assert len(sl_exp_events) == 1 and sl_exp_events[0].amount == leveling.EXP_PER_SUPER_LIKE, sl_exp_events
+    print(
+        f"super like spend OK: balance -1 (now {giver_wallet_after.balance}), receiver +"
+        f"{leveling.EXP_PER_SUPER_LIKE} EXP logged as ExpEvent(type='super_like_received'), "
+        "no caught mon -> zero mon-EXP, no error"
+    )
+
+    # Duplicate-block: a second click by the SAME giver on the SAME
+    # submission is rejected, and grants/decrements nothing further.
+    async with db.session() as s:
+        try:
+            await _superlike.give_super_like(s, giver_id=sl_giver_uid, wild=False, target_id=sl_daily_sub_id)
+            raise AssertionError("expected SuperLikeError for a duplicate super-like")
+        except _superlike.SuperLikeError as exc:
+            assert "already" in str(exc).lower(), exc
+        await s.rollback()
+    async with db.session() as s:
+        giver_wallet_after_dup = await s.get(db.SuperLikeWallet, sl_giver_uid)
+        dup_exp_events = (
+            await s.execute(
+                select(db.ExpEvent).where(
+                    db.ExpEvent.guild_id == sl_gid2,
+                    db.ExpEvent.user_id == sl_author_uid,
+                    db.ExpEvent.type == "super_like_received",
+                )
+            )
+        ).scalars().all()
+    assert giver_wallet_after_dup.balance == 1, giver_wallet_after_dup.balance  # unchanged from before
+    assert len(dup_exp_events) == 1, dup_exp_events  # unchanged: still just the one grant
+    print("super like spend OK: duplicate click by the same giver rejected, nothing granted/decremented again")
+
+    # Mon-EXP routing, daily source: super-liking a submission with an
+    # active/boxed CaughtMon sourced from it grants that mon exactly
+    # MON_EXP_SUPER_LIKE, via source_submission_id (the daily column).
+    async with db.session() as s:
+        sl_daily_mon = db.CaughtMon(
+            user_id=sl_author_uid, is_active=False, slot=1, dex_no=1, name="bulbasaur",
+            cached_image_path="/nonexistent/sl-daily.png", source_submission_id=sl_daily_sub_id,
+        )
+        s.add(sl_daily_mon)
+        await s.commit()
+        sl_daily_mon_id = sl_daily_mon.id
+        sl_giver2 = sl_giver_uid + 1000
+        giver2_wallet = await pokebox.get_or_create_super_like_wallet(s, sl_giver2)
+        giver2_wallet.balance = 1
+        await s.commit()
+    async with db.session() as s:
+        _receiver2, mon_exp_awarded_daily = await _superlike.give_super_like(
+            s, giver_id=sl_giver2, wild=False, target_id=sl_daily_sub_id
+        )
+        await s.commit()
+    assert mon_exp_awarded_daily == leveling.MON_EXP_SUPER_LIKE, mon_exp_awarded_daily
+    async with db.session() as s:
+        sl_daily_mon_after = await s.get(db.CaughtMon, sl_daily_mon_id)
+    assert sl_daily_mon_after.mon_exp == leveling.MON_EXP_SUPER_LIKE, sl_daily_mon_after.mon_exp
+    assert sl_daily_mon_after.is_active is False  # boxed mons still gain, per MON_EXP_UPVOTE precedent
+    print(
+        f"super like mon-EXP OK (daily source): boxed CaughtMon sourced via source_submission_id "
+        f"gains exactly MON_EXP_SUPER_LIKE={leveling.MON_EXP_SUPER_LIKE}"
+    )
+
+    # Mon-EXP routing, wild-encounter source: the SAME check but through
+    # source_wild_encounter_submission_id -- the dual-source-FK bug class the
+    # design doc explicitly flags (Party Mon Leveling's upvote precedent).
+    async with db.session() as s:
+        sl_wild_mon = db.CaughtMon(
+            user_id=sl_author_uid, is_active=True, slot=2, dex_no=4, name="charmander",
+            cached_image_path="/nonexistent/sl-wild.png", source_wild_encounter_submission_id=sl_wild_sub_id,
+        )
+        s.add(sl_wild_mon)
+        await s.commit()
+        sl_wild_mon_id = sl_wild_mon.id
+    async with db.session() as s:
+        _receiver3, mon_exp_awarded_wild = await _superlike.give_super_like(
+            s, giver_id=sl_giver_uid, wild=True, target_id=sl_wild_sub_id
+        )
+        await s.commit()
+    assert mon_exp_awarded_wild == leveling.MON_EXP_SUPER_LIKE, mon_exp_awarded_wild
+    async with db.session() as s:
+        sl_wild_mon_after = await s.get(db.CaughtMon, sl_wild_mon_id)
+    assert sl_wild_mon_after.mon_exp == leveling.MON_EXP_SUPER_LIKE, sl_wild_mon_after.mon_exp
+    print(
+        f"super like mon-EXP OK (wild-encounter source): active CaughtMon sourced via "
+        "source_wild_encounter_submission_id gains exactly "
+        f"MON_EXP_SUPER_LIKE={leveling.MON_EXP_SUPER_LIKE}"
+    )
+
+    # Daily-cap interaction: a mon that's already spent most of today's
+    # MON_EXP_DAILY_CAP only gets the remainder, awarded down to the cap,
+    # never rejected outright -- 150 in one grant is large relative to the
+    # 150 cap, so this is the one place a single super-like grant can, by
+    # itself, exhaust or partially miss the day's budget.
+    sl_cap_gid = 503
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=sl_cap_gid, grace_period_days=7))
+        cap_daily = db.DailyPokemon(guild_id=sl_cap_gid, local_date=today, dex_no=1, name="bulbasaur")
+        s.add(cap_daily)
+        await s.commit()
+        cap_sub = db.Submission(guild_id=sl_cap_gid, user_id=sl_author_uid, daily_id=cap_daily.id)
+        s.add(cap_sub)
+        await s.flush()
+        cap_sub_id = cap_sub.id
+        sl_cap_mon = db.CaughtMon(
+            user_id=sl_author_uid, is_active=False, slot=3, dex_no=1, name="bulbasaur",
+            cached_image_path="/nonexistent/sl-cap.png", source_submission_id=cap_sub_id,
+            exp_today=leveling.MON_EXP_DAILY_CAP - 10, last_exp_date=_datetime.now(UTC).date(),
+        )
+        s.add(sl_cap_mon)
+        cap_giver_wallet = await pokebox.get_or_create_super_like_wallet(s, sl_giver_uid)
+        cap_giver_wallet.balance = 1
+        await s.commit()
+        sl_cap_mon_id = sl_cap_mon.id
+    async with db.session() as s:
+        _receiver4, mon_exp_awarded_capped = await _superlike.give_super_like(
+            s, giver_id=sl_giver_uid, wild=False, target_id=cap_sub_id
+        )
+        await s.commit()
+    assert mon_exp_awarded_capped == 10, mon_exp_awarded_capped  # only the remaining 10 of the day's cap
+    async with db.session() as s:
+        sl_cap_mon_after = await s.get(db.CaughtMon, sl_cap_mon_id)
+    assert sl_cap_mon_after.exp_today == leveling.MON_EXP_DAILY_CAP, sl_cap_mon_after.exp_today
+    print(
+        f"super like mon-EXP OK (daily cap): a mon already at {leveling.MON_EXP_DAILY_CAP - 10}/"
+        f"{leveling.MON_EXP_DAILY_CAP} today's EXP gets only the remaining {mon_exp_awarded_capped} from a "
+        f"{leveling.MON_EXP_SUPER_LIKE}-point grant, never rejected outright"
+    )
+
+    # Grace-window rejection: a submission outside its guild's
+    # grace_period_days is rejected ephemerally, balance unchanged, even
+    # though the giver has balance and it's not a duplicate/self case.
+    sl_expired_gid = 502
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=sl_expired_gid, grace_period_days=7))
+        expired_daily = db.DailyPokemon(
+            guild_id=sl_expired_gid, local_date=today - _timedelta(days=8), dex_no=1, name="bulbasaur"
+        )
+        s.add(expired_daily)
+        await s.commit()
+        expired_sub = db.Submission(
+            guild_id=sl_expired_gid, user_id=sl_self_uid, daily_id=expired_daily.id,
+            created_at=_datetime.now(UTC) - _timedelta(days=8),
+        )
+        s.add(expired_sub)
+        await s.commit()
+        expired_sub_id = expired_sub.id
+        expired_giver_wallet = await pokebox.get_or_create_super_like_wallet(s, sl_giver_uid)
+        expired_giver_wallet.balance = 1
+        await s.commit()
+    async with db.session() as s:
+        try:
+            await _superlike.give_super_like(s, giver_id=sl_giver_uid, wild=False, target_id=expired_sub_id)
+            raise AssertionError("expected SuperLikeError for a submission outside its grace window")
+        except _superlike.SuperLikeError as exc:
+            assert "grace window" in str(exc).lower(), exc
+        await s.rollback()
+    async with db.session() as s:
+        expired_giver_wallet_after = await s.get(db.SuperLikeWallet, sl_giver_uid)
+    assert expired_giver_wallet_after.balance == 1, expired_giver_wallet_after.balance
+    print("super like spend OK: a submission outside its grace window is rejected, balance unchanged")
+
+    # Both submission types are valid super-like targets: re-confirm via the
+    # custom_id scheme itself (kind 's' for daily, kind 'w' for wild), which
+    # is what actually routes a real click to the right table/column.
+    daily_button = SuperLikeButton.for_submission(sl_daily_sub_id, wild=False)
+    wild_button = SuperLikeButton.for_submission(sl_wild_sub_id, wild=True)
+    assert daily_button.item.custom_id == f"superlike:s:{sl_daily_sub_id}", daily_button.item.custom_id
+    assert wild_button.item.custom_id == f"superlike:w:{sl_wild_sub_id}", wild_button.item.custom_id
+    print("super like target OK: both daily ('s') and wild-encounter ('w') submissions produce valid targets")
+
+    # Restart-survival: a fresh SuperLikeButton instance, reconstructed
+    # purely from a persisted custom_id string with NO reference to the
+    # original instance (simulating a bot restart -- see the design doc's
+    # DynamicItem persistence constraint), still resolves to the correct
+    # submission and re-validates a real balance check correctly. A
+    # complementary real-rendered version of this same check lives in
+    # scripts/proof_super_like_display.py (Card 4/5).
+    persisted_custom_id = daily_button.item.custom_id
+    match = _sl_re.fullmatch(SUPER_LIKE_CUSTOM_ID_TEMPLATE, persisted_custom_id)
+    assert match is not None, persisted_custom_id
+    reconstructed_button = await SuperLikeButton.from_custom_id(None, None, match)
+    assert reconstructed_button.kind == "s" and reconstructed_button.target_id == sl_daily_sub_id, (
+        reconstructed_button.kind, reconstructed_button.target_id
+    )
+    async with db.session() as s:
+        try:
+            # sl_giver_uid already super-liked sl_daily_sub_id earlier -- this
+            # reconstructed-post-restart button must still enforce a real
+            # duplicate check, proving the DynamicItem registration survives
+            # a restart without needing the original message re-touched.
+            await _superlike.give_super_like(
+                s, giver_id=sl_giver_uid, wild=(reconstructed_button.kind == "w"),
+                target_id=reconstructed_button.target_id,
+            )
+            raise AssertionError("expected the reconstructed button's target to still be duplicate-blocked")
+        except _superlike.SuperLikeError as exc:
+            assert "already" in str(exc).lower(), exc
+        await s.rollback()
+    print(
+        "super like restart-survival OK: a SuperLikeButton rebuilt purely from a persisted custom_id "
+        "(no reference to the original instance) still resolves the correct submission and re-validates "
+        "server-side correctly"
+    )
+
+    # /help: EXP breakdown pulls EXP_PER_SUPER_LIKE (player EXP field) and
+    # MON_EXP_SUPER_LIKE (mon EXP field) live from leveling.py, per the
+    # master plan's no-drift rule.
+    from pokesketch.cogs.help import _mon_exp_field_value
+
+    sl_help_exp_text = _exp_field_value()
+    sl_help_mon_exp_text = _mon_exp_field_value()
+    assert f"{leveling.EXP_PER_SUPER_LIKE} EXP" in sl_help_exp_text, sl_help_exp_text
+    assert str(leveling.MON_EXP_SUPER_LIKE) in sl_help_mon_exp_text, sl_help_mon_exp_text
+    print("super like help OK: /help EXP breakdown reflects live EXP_PER_SUPER_LIKE / MON_EXP_SUPER_LIKE")
 
     print("ALL SMOKE TESTS PASSED")
 

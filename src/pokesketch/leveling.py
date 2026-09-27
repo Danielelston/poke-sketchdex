@@ -21,6 +21,12 @@ EXP_UPVOTE_GIVEN_DAILY_CAP = 10
 EXP_DAILY_WINNER = 25
 EXP_THEME_CHALLENGE = 50
 EXP_SHINY_BONUS = 15
+# Receiving a super like on your sketch (see Super Likes on Submissions Plan):
+# bigger than a free upvote-received (EXP_PER_UPVOTE_RECEIVED, capped) because
+# it costs the giver a scarce, submission-earned resource, smaller than
+# winning the whole day (EXP_DAILY_WINNER). Deliberately uncapped per
+# recipient per day — the giver's own limited stock is the only throttle.
+EXP_PER_SUPER_LIKE = 15
 
 
 def streak_bonus(streak: int) -> int:
@@ -62,6 +68,12 @@ def exp_into_level(exp: int) -> tuple[int, int, int]:
 MON_EXP_SUBMIT = 50
 MON_EXP_UPVOTE = 20
 MON_EXP_KUDOS = 250
+# Party mon EXP for a super like (see Super Likes on Submissions Plan): same
+# ~10x multiplier MON_EXP_UPVOTE (20) already uses over
+# EXP_PER_UPVOTE_RECEIVED (2), applied to EXP_PER_SUPER_LIKE (15).
+# User-confirmed 2026-09-26. Still subject to MON_EXP_DAILY_CAP like every
+# other mon-EXP source, via the shared award_mon_exp() helper.
+MON_EXP_SUPER_LIKE = 150
 MON_EXP_DAILY_CAP = 150
 MON_LEVEL_CAP = 100
 

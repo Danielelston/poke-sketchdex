@@ -270,6 +270,71 @@ class PokeballWallet(Base):
     last_granted_week: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
 
+class SuperLikeWallet(Base):
+    """Global super-like balance, one per Discord user, shared across every guild.
+
+    Mirrors `PokeballWallet`'s global-not-per-guild shape. Unlike
+    `PokeballWallet`, there is no starter grant — a brand-new player has a
+    balance of 0 until their first accepted submission (see Super Likes on
+    Submissions Plan design doc), so the row is created lazily on first
+    accepted submission, mirroring `_get_or_create_user`.
+    """
+
+    __tablename__ = "super_like_wallets"
+
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    balance: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class SuperLike(Base):
+    """A single super-like given to a submission's author by a voter.
+
+    Global (not guild-scoped), same posture as `Kudos`/`CaughtMon`/
+    `PokeballWallet` — a super like earned in one server can be spent on a
+    submission in another. Dual source-FK columns mirror `CaughtMon`'s
+    `source_submission_id` / `source_wild_encounter_submission_id` shape: a
+    row points at exactly one of `submission_id` (daily `Submission`) or
+    `wild_encounter_submission_id` (`WildEncounterSubmission`), never both.
+
+    One super like per (giver, submission) pair, ever — enforced by two
+    separate unique constraints, one per source column, rather than a single
+    constraint spanning both nullable columns. SQLite (and standard SQL)
+    treats NULL as distinct from NULL for uniqueness purposes, so a single
+    constraint over `(submission_id, wild_encounter_submission_id, voter_id)`
+    would silently fail to block a duplicate wild-encounter super-like (its
+    `submission_id` is always NULL, and NULL != NULL). Splitting into two
+    constraints — each keyed on one non-null-for-that-row-type column plus
+    `voter_id` — correctly enforces uniqueness per submission type: the
+    other column is NULL for that row and NULL-vs-NULL rows never collide,
+    so the constraint on the unrelated column never spuriously fires.
+    """
+
+    __tablename__ = "super_likes"
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_id", "voter_id", name="uq_super_like_submission_voter"
+        ),
+        UniqueConstraint(
+            "wild_encounter_submission_id",
+            "voter_id",
+            name="uq_super_like_wild_encounter_submission_voter",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    submission_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("submissions.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    wild_encounter_submission_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("wild_encounter_submissions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    voter_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class CaughtMon(Base):
     """A caught sketch image, global, capped at 20 total per user / 6 active.
 

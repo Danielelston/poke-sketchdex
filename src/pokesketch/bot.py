@@ -18,7 +18,7 @@ from .daily import post_daily_for_guild, post_wild_encounter_for_guild
 from .daily_spotlight import post_daily_spotlight_for_guild
 from .default_events import seed_default_events
 from .pokeapi import PokeApiClient
-from .ui import FormsButtonView
+from .ui import FormsButtonView, SuperLikeButton
 
 log = logging.getLogger(__name__)
 
@@ -83,10 +83,18 @@ class PokeSketchDexBot(commands.Bot):
         `forms_button_view` is normally already set in `__init__` (so
         `daily.py` can reuse the same instance); guarded here too so this
         method stays safe to call standalone.
+
+        `SuperLikeButton` is registered differently: it's a
+        `discord.ui.DynamicItem`, so `add_dynamic_items` takes the *class*,
+        not a per-message instance (see its docstring in ui.py) — one call
+        here is enough to route clicks on every still-open submission post,
+        across every guild, for the rest of the process's life, with no
+        per-message re-registration ever needed.
         """
         if not hasattr(self, "forms_button_view"):
             self.forms_button_view = FormsButtonView()
         self.add_view(self.forms_button_view)
+        self.add_dynamic_items(SuperLikeButton)
         # TEMP DIAGNOSTIC: dump what discord.py's internal view store actually
         # holds after add_view(), to confirm the button's (component_type,
         # custom_id) key is really registered under the persistent (None)
