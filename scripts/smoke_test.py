@@ -589,6 +589,7 @@ async def main() -> None:
             self.attachments = [type("Attachment", (), {"url": url})()]
             self._thread = thread
             self.created_threads: list[dict] = []
+            self.view = None
 
         async def add_reaction(self, emoji):
             pass
@@ -596,6 +597,11 @@ async def main() -> None:
         async def create_thread(self, **kwargs):
             self.created_threads.append(kwargs)
             return self._thread
+
+        async def edit(self, *args, **kwargs):
+            # Card 4/5 attaches the Super Like button via message.edit()
+            # once sub.id is known -- see cogs/submissions.py.
+            self.view = kwargs.get("view")
 
     class _FakeThread:
         def __init__(self, thread_id: int):

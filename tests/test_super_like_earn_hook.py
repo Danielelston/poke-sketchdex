@@ -45,8 +45,15 @@ class _FakeMessage:
     def __init__(self, msg_id: int):
         self.id = msg_id
         self.attachments = [_FakeSentAttachment(f"https://x/{msg_id}.png")]
+        self.view = None
 
     async def add_reaction(self, emoji):
+        return None
+
+    async def edit(self, *args, **kwargs):
+        # Card 4/5 attaches the Super Like button via message.edit() once
+        # sub.id is known -- capture it so a test can assert on it if needed.
+        self.view = kwargs.get("view")
         return None
 
 
