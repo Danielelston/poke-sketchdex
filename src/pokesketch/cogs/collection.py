@@ -7,6 +7,7 @@ wallet are shared across every server the bot is in.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -22,6 +23,28 @@ log = logging.getLogger(__name__)
 BOX_PAGE_SIZE = 10
 
 MAX_AUTOCOMPLETE_CHOICES = 25
+
+PUBLIC_POST_LIFETIME_SECONDS = 600
+
+AUTO_DELETE_FOOTER_NOTE = "Auto-deletes in 10 min"
+
+
+def _schedule_public_delete(message: discord.Message) -> None:
+    """Fire-and-forget task that deletes a public /party or /box post after ~10 minutes."""
+
+    async def _delete_later() -> None:
+        await asyncio.sleep(PUBLIC_POST_LIFETIME_SECONDS)
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.HTTPException):
+            log.debug("Auto-delete for message %s failed (already gone or forbidden).", message.id)
+            return
+        log.debug("Auto-deleted public post %s after %ss.", message.id, PUBLIC_POST_LIFETIME_SECONDS)
+
+    log.debug(
+        "Scheduling auto-delete for public post %s in %ss.", message.id, PUBLIC_POST_LIFETIME_SECONDS
+    )
+    asyncio.create_task(_delete_later())
 
 
 def _display_name(mon: db.CaughtMon) -> str:
@@ -111,31 +134,55 @@ class Collection(commands.Cog):
         )
 
     @app_commands.command(name="party", description="Show your (or someone's) 6 active party slots.")
-    @app_commands.describe(user="Whose party to show (default: you)")
-    async def party(self, interaction: discord.Interaction, user: discord.User | None = None) -> None:
+    @app_commands.describe(
+        user="Whose party to show (default: you)",
+        public="Post visibly to the channel instead of just to you (auto-deletes in 10 min)",
+    )
+    async def party(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User | None = None,
+        public: bool = False,
+    ) -> None:
         target = user or interaction.user
         async with db.session() as s:
             mons = await pokebox.party_listing(s, target.id)
 
         if not mons:
             await interaction.response.send_message(
-                f"{target.display_name} doesn't have any active party members yet. Catch one with `/catch`!"
+                f"{target.display_name} doesn't have any active party members yet. Catch one with `/catch`!",
+                ephemeral=True,
             )
             return
 
         embeds, files = pokebox.build_party_embeds(target.display_name, mons)
-        await interaction.response.send_message(embeds=embeds, files=files)
+        if public:
+            embeds[-1].set_footer(text=AUTO_DELETE_FOOTER_NOTE)
+        await interaction.response.send_message(embeds=embeds, files=files, ephemeral=not public)
+        if public:
+            message = await interaction.original_response()
+            _schedule_public_delete(message)
 
     @app_commands.command(name="box", description="Paginated view of your (or someone's) storage box.")
-    @app_commands.describe(user="Whose box to show (default: you)")
-    async def box(self, interaction: discord.Interaction, user: discord.User | None = None) -> None:
+    @app_commands.describe(
+        user="Whose box to show (default: you)",
+        public="Post visibly to the channel instead of just to you (auto-deletes in 10 min)",
+    )
+    async def box(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User | None = None,
+        public: bool = False,
+    ) -> None:
         target = user or interaction.user
         async with db.session() as s:
             mons = await pokebox.box_listing(s, target.id)
             total = await pokebox.total_caught_count(s, target.id)
 
         if not mons:
-            await interaction.response.send_message(f"{target.display_name}'s storage box is empty.")
+            await interaction.response.send_message(
+                f"{target.display_name}'s storage box is empty.", ephemeral=True
+            )
             return
 
         chunks = [mons[i : i + BOX_PAGE_SIZE] for i in range(0, len(mons), BOX_PAGE_SIZE)]
@@ -147,17 +194,23 @@ class Collection(commands.Cog):
                 description="\n".join(lines),
                 color=0x2ECC71,
             )
-            embed.set_footer(
-                text=f"{len(mons)} boxed · {total}/{pokebox.MAX_TOTAL} total caught · page {page_no}/{len(chunks)}"
-            )
+            footer_text = f"{len(mons)} boxed · {total}/{pokebox.MAX_TOTAL} total caught · page {page_no}/{len(chunks)}"
+            if public:
+                footer_text = f"{footer_text} · {AUTO_DELETE_FOOTER_NOTE}"
+            embed.set_footer(text=footer_text)
             pages.append(embed)
 
         if len(pages) == 1:
-            await interaction.response.send_message(embed=pages[0])
+            await interaction.response.send_message(embed=pages[0], ephemeral=not public)
+            if public:
+                message = await interaction.original_response()
+                _schedule_public_delete(message)
             return
         view = PaginatorView(pages, author_id=interaction.user.id)
-        await interaction.response.send_message(embed=pages[0], view=view)
+        await interaction.response.send_message(embed=pages[0], view=view, ephemeral=not public)
         view.message = await interaction.original_response()
+        if public:
+            _schedule_public_delete(view.message)
 
     @app_commands.command(name="swap", description="Swap a boxed mon into an active party slot.")
     @app_commands.describe(box_slot="Box slot (1-20) to promote", active_slot="Active slot (1-6) to place it in")
