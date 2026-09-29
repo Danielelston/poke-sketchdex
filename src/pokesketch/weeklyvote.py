@@ -345,13 +345,24 @@ async def resolve_category_poll(client: discord.Client, api: PokeApiClient, guil
         cfg = await s.get(GuildConfig, guild_id)
         if cfg is None or not cfg.channel_id:
             return False
-        iso_week = pokebox.week_key()
+        # Look up the most recent row awaiting day-1 resolution directly,
+        # rather than recomputing "today's" ISO week: day1 (Sunday) and day2
+        # (Monday) straddle the ISO week boundary (weeks start Monday), so
+        # re-deriving iso_week here can point at a week with no row yet and
+        # silently miss the poll posted the day before.
         wv = (
             await s.execute(
-                select(WeeklyVote).where(WeeklyVote.guild_id == guild_id, WeeklyVote.iso_week == iso_week)
+                select(WeeklyVote)
+                .where(
+                    WeeklyVote.guild_id == guild_id,
+                    WeeklyVote.category_poll_message_id.is_not(None),
+                    WeeklyVote.category.is_(None),
+                )
+                .order_by(WeeklyVote.id.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
-        if wv is None or wv.category_poll_message_id is None or wv.category is not None:
+        if wv is None or wv.category_poll_message_id is None:
             return False  # no day-1 poll to resolve, or already resolved
         channel_id, message_id, weekly_vote_id = cfg.channel_id, wv.category_poll_message_id, wv.id
 
@@ -401,13 +412,22 @@ async def resolve_choice_poll(client: discord.Client, api: PokeApiClient, guild_
         cfg = await s.get(GuildConfig, guild_id)
         if cfg is None or not cfg.channel_id:
             return False
-        iso_week = pokebox.week_key()
+        # Same ISO-week-boundary hazard as resolve_category_poll: find the
+        # most recent row awaiting day-2 resolution directly instead of
+        # recomputing "today's" ISO week.
         wv = (
             await s.execute(
-                select(WeeklyVote).where(WeeklyVote.guild_id == guild_id, WeeklyVote.iso_week == iso_week)
+                select(WeeklyVote)
+                .where(
+                    WeeklyVote.guild_id == guild_id,
+                    WeeklyVote.choice_poll_message_id.is_not(None),
+                    WeeklyVote.resolved_dex_pool.is_(None),
+                )
+                .order_by(WeeklyVote.id.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
-        if wv is None or wv.choice_poll_message_id is None or wv.resolved_dex_pool is not None:
+        if wv is None or wv.choice_poll_message_id is None:
             return False  # no day-2 poll to resolve, or already resolved (e.g. auto-resolved)
         channel_id, message_id = cfg.channel_id, wv.choice_poll_message_id
         weekly_vote_id, category = wv.id, wv.category
