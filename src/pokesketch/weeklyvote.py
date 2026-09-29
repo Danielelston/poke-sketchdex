@@ -203,7 +203,12 @@ async def resolve_dex_pool(s, api: PokeApiClient, guild_id: int, category: str, 
     """Resolve a winning category/choice to a list of dex numbers, populating
     the relevant cache table (Type/Habitat/LocationArea) if needed."""
     if category == CATEGORY_TYPE:
-        return await _get_type_pool(s, api, choice_key)
+        # choice_key here is the raw winning poll-answer text, e.g.
+        # "⚙️ Steel" (see _day2_candidates: display text and choice_key are
+        # NOT equal for Type, unlike every other category) -- strip the
+        # leading emoji and title-casing back down to the bare type name
+        # PokeAPI expects, or every Type-category resolution 400s.
+        return await _get_type_pool(s, api, choice_key.split(" ", 1)[-1].strip().lower())
     if category == CATEGORY_HABITAT:
         return await _get_habitat_pool(s, api, choice_key.lower().replace(" ", "-"))
     if category == CATEGORY_GENERATION:
