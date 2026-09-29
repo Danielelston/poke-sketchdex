@@ -35,3 +35,6 @@ htmlcov/
 *.swp
 .idea/
 .vscode/
+
+# Agent worktrees
+.worktrees/
