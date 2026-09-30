@@ -3443,7 +3443,7 @@ async def main() -> None:
         # pair -> cache miss -> fetches and saves.
         async with db.session() as s:
             mon_row = await s.get(db.CaughtMon, sketch_mon_id)
-            path1 = await pokebox.sync_party_sketch_cache(s, mon_row, sketch_cache_dir)
+            path1 = await pokebox.sync_party_sketch_cache(None, s, mon_row, sketch_cache_dir)
         assert path1 is not None and os.path.exists(path1), path1
         assert path1.endswith(f"{sketch_mon_id}_{sub_new_id}.png"), path1
         assert len(_fetch_calls) == 1, _fetch_calls
@@ -3452,7 +3452,7 @@ async def main() -> None:
         # -> cache hit -> zero additional fetches.
         async with db.session() as s:
             mon_row = await s.get(db.CaughtMon, sketch_mon_id)
-            path2 = await pokebox.sync_party_sketch_cache(s, mon_row, sketch_cache_dir)
+            path2 = await pokebox.sync_party_sketch_cache(None, s, mon_row, sketch_cache_dir)
         assert path2 == path1, (path2, path1)
         assert len(_fetch_calls) == 1, "cache hit must not perform a network fetch"
 
@@ -3474,7 +3474,7 @@ async def main() -> None:
 
         async with db.session() as s:
             mon_row = await s.get(db.CaughtMon, sketch_mon_id)
-            path3 = await pokebox.sync_party_sketch_cache(s, mon_row, sketch_cache_dir)
+            path3 = await pokebox.sync_party_sketch_cache(None, s, mon_row, sketch_cache_dir)
         assert path3 is not None and path3 != path1, (path3, path1)
         assert path3.endswith(f"{sketch_mon_id}_{resub_id}.png"), path3
         assert len(_fetch_calls) == 2, _fetch_calls
@@ -3515,10 +3515,96 @@ async def main() -> None:
         fetches_before = len(_fetch_calls)
         async with db.session() as s:
             mon_row = await s.get(db.CaughtMon, never_mon_id)
-            no_sketch_path = await pokebox.sync_party_sketch_cache(s, mon_row, sketch_cache_dir)
+            no_sketch_path = await pokebox.sync_party_sketch_cache(None, s, mon_row, sketch_cache_dir)
         assert no_sketch_path is None
         assert len(_fetch_calls) == fetches_before, "no matching submission must never trigger a fetch"
         print("sync_party_sketch_cache OK: no matching submission -> None, zero fetches, no crash")
+
+        # --- Stale-URL resolution: Discord CDN attachment URLs expire (a
+        # signed `ex=` window), so a submission's stored image_url can 404
+        # by the time this feature reads it back (observed in production —
+        # every submission older than a few hours 404'd). sync_party_sketch_cache
+        # must re-resolve a fresh URL via Discord's message API before
+        # falling back to the stale stored copy. -----------------------
+        class _FakeFetchedAttachment:
+            def __init__(self, url: str) -> None:
+                self.url = url
+
+        class _FakeFetchedMessage:
+            def __init__(self, url: str) -> None:
+                self.attachments = [_FakeFetchedAttachment(url)]
+
+        class _FakeThreadForRefetch:
+            def __init__(self, fresh_url: str) -> None:
+                self._fresh_url = fresh_url
+
+            async def fetch_message(self, message_id: int) -> _FakeFetchedMessage:
+                return _FakeFetchedMessage(self._fresh_url)
+
+        class _FakeBotForRefetch:
+            def __init__(self, channels: dict[int, object]) -> None:
+                self._channels = channels
+
+            def get_channel(self, cid: int):
+                return self._channels.get(cid)
+
+            async def fetch_channel(self, cid: int):
+                return self._channels[cid]
+
+        fresh_url = "https://cdn.discordapp.com/attachments/1/2/fresh.png?ex=live"
+        stale_url = "https://cdn.discordapp.com/attachments/1/2/stale.png?ex=expired"
+        refetch_thread_id = 920001
+        refetch_uid = 8100
+
+        async def _cache_image_rejects_stale(url, user_id, caughtmon_id, cache_dir, filename=None):
+            if url == stale_url:
+                raise RuntimeError("simulated 404: stale Discord CDN URL expired")
+            return await _real_cache_image(url, user_id, caughtmon_id, cache_dir, filename=filename)
+
+        async with db.session() as s:
+            refetch_wallet = await pokebox.get_or_create_wallet(s, refetch_uid)
+            refetch_wallet.balance = 5
+            await s.commit()
+            s.add(db.GuildConfig(guild_id=910006))
+            refetch_daily = db.DailyPokemon(
+                guild_id=910006, local_date=_date.today(), dex_no=1, name="bulbasaur",
+                thread_id=refetch_thread_id,
+            )
+            s.add(refetch_daily)
+            await s.flush()
+            refetch_sub = db.Submission(
+                guild_id=910006, user_id=refetch_uid, daily_id=refetch_daily.id,
+                message_id=555001, image_url=stale_url,
+            )
+            s.add(refetch_sub)
+            await s.commit()
+            refetch_sub_id = refetch_sub.id
+
+        # Catch with the REAL _cache_image first (mirrors production: the
+        # /catch-time cache is fetched immediately, while the URL is still
+        # fresh) — only sync_party_sketch_cache's LATER read of the same
+        # submission needs to cope with the now-stale URL.
+        async with db.session() as s:
+            refetch_mon = await pokebox.catch_submission(
+                s, refetch_uid, party_dir, target=f"s{refetch_sub_id}"
+            )
+            await s.commit()
+            refetch_mon_id = refetch_mon.id
+
+        pokebox._cache_image = _cache_image_rejects_stale
+        try:
+            fake_bot = _FakeBotForRefetch({refetch_thread_id: _FakeThreadForRefetch(fresh_url)})
+            async with db.session() as s:
+                mon_row = await s.get(db.CaughtMon, refetch_mon_id)
+                refetch_path = await pokebox.sync_party_sketch_cache(fake_bot, s, mon_row, sketch_cache_dir)
+            assert refetch_path is not None and os.path.exists(refetch_path), refetch_path
+            print(
+                "sync_party_sketch_cache OK: a stale stored Submission.image_url (simulated expired "
+                "Discord CDN link) is re-resolved via a fresh fetch_message() call before falling "
+                "back to the stored URL, so an old matching submission still renders"
+            )
+        finally:
+            pokebox._cache_image = _real_cache_image
     finally:
         pokebox._cache_image = _real_cache_image
 
