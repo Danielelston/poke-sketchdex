@@ -763,7 +763,40 @@ def _delete_stale_sketch_cache_files(user_dir: str, caughtmon_id: int, keep_file
             delete_cached_file(os.path.join(user_dir, name))
 
 
-async def sync_party_sketch_cache(s, mon: CaughtMon, cache_dir: str) -> str | None:
+async def _resolve_fresh_submission_image_url(bot, s, sub: Submission) -> str | None:
+    """Re-resolve a live, non-expired attachment URL for `sub` via Discord's
+    message API, rather than trusting `sub.image_url` — Discord CDN
+    attachment URLs are signed with a short-lived `ex=` expiry and a URL
+    stored at submission time 404s once that window passes (observed in
+    production: every submission older than a few hours failed with a real
+    404, not a transient network error). `/catch`'s own `_cache_image` call
+    happens immediately at submission time so it doesn't hit this window,
+    but this feature fetches a "latest matching submission" that can be
+    arbitrarily old, so it must re-fetch the Discord message and read its
+    CURRENT attachment URL instead of the stale stored copy.
+
+    Returns None on any failure (channel/thread gone, message deleted,
+    missing permissions, no attachments) so the caller can fall back to the
+    stored `sub.image_url` as a last-ditch attempt.
+    """
+    if sub.message_id is None:
+        return None
+    thread_id = (
+        await s.execute(select(DailyPokemon.thread_id).where(DailyPokemon.id == sub.daily_id))
+    ).scalar_one_or_none()
+    if thread_id is None:
+        return None
+    try:
+        channel = bot.get_channel(thread_id) or await bot.fetch_channel(thread_id)
+        message = await channel.fetch_message(sub.message_id)
+    except Exception:
+        return None
+    if not message.attachments:
+        return None
+    return message.attachments[0].url
+
+
+async def sync_party_sketch_cache(bot, s, mon: CaughtMon, cache_dir: str) -> str | None:
     """Lazy refresh, cache-by-submission-id: return the local path to use for
     `mon`'s own-sketch party thumbnail, or None if no matching submission
     exists at all yet (a normal, expected case — NOT logged; see per-slot
@@ -773,9 +806,12 @@ async def sync_party_sketch_cache(s, mon: CaughtMon, cache_dir: str) -> str | No
     Cache hit (a file for the latest matching submission id already exists
     under data/party_sketch_cache/{user_id}/{caughtmon_id}_{submission_id}.png)
     performs zero network calls. Cache miss (the latest matching submission
-    id is newer than whatever is cached, or nothing is cached yet) fetches
-    via _cache_image/_normalize_and_save (reused, not reimplemented) and
-    deletes the prior stale file for this caughtmon_id on success.
+    id is newer than whatever is cached, or nothing is cached yet) re-resolves
+    a live attachment URL via Discord (see _resolve_fresh_submission_image_url
+    — the stored Submission.image_url is frequently expired by the time an
+    old submission is read back here) and fetches via
+    _cache_image/_normalize_and_save (reused, not reimplemented), deleting
+    the prior stale file for this caughtmon_id on success.
     """
     sub = await latest_matching_submission(s, mon.user_id, mon.dex_no, mon.is_shiny)
     if sub is None:
@@ -787,12 +823,15 @@ async def sync_party_sketch_cache(s, mon: CaughtMon, cache_dir: str) -> str | No
     if os.path.exists(target_path):
         return target_path  # cache hit — zero fetches.
 
+    fresh_url = await _resolve_fresh_submission_image_url(bot, s, sub)
+    fetch_url = fresh_url or sub.image_url
     try:
-        new_path = await _cache_image(sub.image_url, mon.user_id, mon.id, cache_dir, filename=target_filename)
+        new_path = await _cache_image(fetch_url, mon.user_id, mon.id, cache_dir, filename=target_filename)
     except Exception:
         log.warning(
-            "Failed to fetch/cache sketch party art: user_id=%s caughtmon_id=%s submission_id=%s",
-            mon.user_id, mon.id, sub.id, exc_info=True,
+            "Failed to fetch/cache sketch party art: user_id=%s caughtmon_id=%s submission_id=%s "
+            "used_fresh_url=%s",
+            mon.user_id, mon.id, sub.id, fresh_url is not None, exc_info=True,
         )
         return None
 
