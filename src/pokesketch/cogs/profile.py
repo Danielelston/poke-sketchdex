@@ -483,7 +483,7 @@ class Profile(commands.Cog):
                 for mon in party[:MAX_PARTY_LINES]:
                     try:
                         sketch_paths[mon.slot] = await pokebox.sync_party_sketch_cache(
-                            sketch_s, mon, self.bot.config.party_sketch_cache_dir
+                            self.bot, sketch_s, mon, self.bot.config.party_sketch_cache_dir
                         )
                     except Exception:
                         log.warning(
