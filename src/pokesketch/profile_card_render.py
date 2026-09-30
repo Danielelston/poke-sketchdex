@@ -182,6 +182,15 @@ class PartyCardSlot:
     # module stays synchronous and just opens+composites it), or None if no
     # sprite was fetched/available.
     sprite_path: str | None = None
+    # Local file path to a cached own-sketch party thumbnail (Own-Sketch
+    # Party Thumbnails Plan) — the target's most recent matching submission,
+    # resolved+cached by the async caller (pokebox.sync_party_sketch_cache),
+    # or None when the toggle is off or no matching submission exists yet.
+    # When set, _draw_party_tile() tries this FIRST via an aspect-preserving,
+    # letterboxed composite (never the sprite path's stretch-resize); on ANY
+    # load/decode failure for this slot it falls back to sprite_path instead
+    # — per-slot fallback, never a broken tile, never all-or-nothing.
+    sketch_path: str | None = None
     # CaughtMon.mon_level — the mon's current level (party mon leveling
     # feature, see Party Mon Leveling Plan design doc).
     mon_level: int = 1
@@ -547,6 +556,33 @@ def _draw_corner_ribbon_badge(
     )
 
 
+def _draw_letterboxed_sketch(card: Image.Image, box: tuple[int, int, int, int], sketch_path: str) -> bool:
+    """Composite `sketch_path` into `box` via an aspect-preserving
+    `.thumbnail()` resize, centered, letterboxed against whatever is already
+    painted in `box` (COLOR_BASE, per the caller) rather than stretched to
+    fill it — real user sketches have wildly inconsistent aspect ratios
+    (539x555 square vs. 1080x581 wide vs. 810x1080 tall in production data),
+    unlike the sprite path's near-square official artwork, so a hard
+    `.resize()` stretch would visibly squish them. Returns True on success,
+    False on any load/decode failure so the caller can fall back to the
+    official sprite for this slot instead (per-slot fallback, never a broken
+    tile)."""
+    box_w = box[2] - box[0]
+    box_h = box[3] - box[1]
+    try:
+        with Image.open(sketch_path) as sketch_img:
+            sketch_img = sketch_img.convert("RGBA")
+            thumb = sketch_img.copy()
+            thumb.thumbnail((box_w, box_h), Image.Resampling.LANCZOS)
+            px = box[0] + (box_w - thumb.width) // 2
+            py = box[1] + (box_h - thumb.height) // 2
+            card.paste(thumb, (px, py), thumb)
+        return True
+    except Exception:
+        log.warning("Failed to composite party sketch from %r", sketch_path, exc_info=True)
+        return False
+
+
 def _draw_party_tile(
     card: Image.Image,
     draw: ImageDraw.ImageDraw,
@@ -591,7 +627,10 @@ def _draw_party_tile(
         x1 - PARTY_IMAGE_MARGIN, y0 + PARTY_IMAGE_MARGIN + PARTY_IMAGE_HEIGHT,
     )
     _draw_panel(draw, image_box, fill=COLOR_BASE, outline=None, radius=PARTY_IMAGE_RADIUS)
-    if slot.sprite_path:
+    sketch_rendered = False
+    if slot.sketch_path:
+        sketch_rendered = _draw_letterboxed_sketch(card, image_box, slot.sketch_path)
+    if not sketch_rendered and slot.sprite_path:
         try:
             with Image.open(slot.sprite_path) as sprite_img:
                 sprite_img = sprite_img.convert("RGBA").resize(
