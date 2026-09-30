@@ -124,6 +124,15 @@ class GlobalUser(Base):
     longest_global_streak: Mapped[int] = mapped_column(Integer, default=0)
     last_submit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Own-Sketch Party Thumbnails opt-in (Lv5+ gated at the command layer, not
+    # here) — global, not per-guild, since the active party itself is global.
+    # NEW COLUMN on an EXISTING live table: db.create_all() only creates
+    # missing tables, not columns on a table that already has rows, so this
+    # requires a manual, documented deploy step (back up the DB first):
+    #   ALTER TABLE global_users ADD COLUMN sketch_party_art_enabled BOOLEAN DEFAULT 0
+    # Same posture as CaughtMon's mon_exp/exp_today columns (Party Mon
+    # Leveling Plan). Rollback: safe to leave in place, unused, default False.
+    sketch_party_art_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class Submission(Base):
