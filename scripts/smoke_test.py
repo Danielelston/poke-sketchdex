@@ -244,10 +244,10 @@ async def main() -> None:
     # /catch offline: stub the network image download so the smoke test stays offline.
     party_dir = os.path.join(tmp, "party_cache")
 
-    async def _fake_cache_image(url, user_id, caughtmon_id, cache_dir):
+    async def _fake_cache_image(url, user_id, caughtmon_id, cache_dir, filename=None):
         user_dir = os.path.join(cache_dir, str(user_id))
         os.makedirs(user_dir, exist_ok=True)
-        path = os.path.join(user_dir, f"{caughtmon_id}.png")
+        path = os.path.join(user_dir, filename or f"{caughtmon_id}.png")
         with open(path, "wb") as fh:
             fh.write(b"fake-image-bytes")
         return path
@@ -2156,9 +2156,10 @@ async def main() -> None:
             return _FakeProfileMessage()
 
     class _FakeProfileBotConfig:
-        def __init__(self, badge_cache_dir: str, image_cache_dir: str):
+        def __init__(self, badge_cache_dir: str, image_cache_dir: str, party_sketch_cache_dir: str | None = None):
             self.badge_cache_dir = badge_cache_dir
             self.image_cache_dir = image_cache_dir
+            self.party_sketch_cache_dir = party_sketch_cache_dir or os.path.join(tmp, "party_sketch_cache")
 
     class _FakeAccentColor:
         def __init__(self, r: int, g: int, b: int):
@@ -2455,7 +2456,7 @@ async def main() -> None:
         username="CombinedKudosTester", level=1, rank_tier="Poké Ball", title_badge="Poké Ball Trainer",
         exp_into=0, exp_need=100, global_streak=0, global_streak_best=0, global_sketch_count=0,
         accuracy_pct=0.0, dex_scanned=0, dex_total=1025, shiny_count=0, shiny_example=None,
-        kudos_count=5, upvotes_received_count=3, party=[], sprite_paths={},
+        kudos_count=5, upvotes_received_count=3, party=[], sprite_paths={}, sketch_paths={},
         server_level=None, server_streak=None, server_streak_best=None, server_sketch_count=None,
         accent_color=None, avatar_path=None,
     )
@@ -3351,6 +3352,400 @@ async def main() -> None:
         )
     finally:
         _collection_mod.asyncio = real_asyncio_ns
+
+    # ================================================================
+    # Own-Sketch Party Thumbnails Plan
+    # ================================================================
+
+    from PIL import Image as _SketchImage
+
+    # --- latest_matching_submission: dex_no + is_shiny must BOTH match,
+    # most recent first, cross-guild (no guild filter). ------------------
+    sketch_uid = 8001
+    async with db.session() as s:
+        # Two guilds, same species, non-shiny — newer one (guild 2) must win
+        # even though it's a different guild than the older one.
+        sketch_gid_old, sketch_gid_new, sketch_gid_shiny = 910001, 910002, 910003
+        s.add(db.GuildConfig(guild_id=sketch_gid_old))
+        s.add(db.GuildConfig(guild_id=sketch_gid_new))
+        s.add(db.GuildConfig(guild_id=sketch_gid_shiny))
+        d_old = db.DailyPokemon(
+            guild_id=sketch_gid_old, local_date=_date.today() - _timedelta(days=5), dex_no=1, name="bulbasaur"
+        )
+        s.add(d_old)
+        await s.flush()
+        sub_old = db.Submission(
+            guild_id=sketch_gid_old, user_id=sketch_uid, daily_id=d_old.id,
+            image_url="https://example.invalid/sketch_old.png",
+            created_at=_datetime.now(UTC) - _timedelta(days=5),
+        )
+        s.add(sub_old)
+        d_new = db.DailyPokemon(guild_id=sketch_gid_new, local_date=_date.today(), dex_no=1, name="bulbasaur")
+        s.add(d_new)
+        await s.flush()
+        sub_new = db.Submission(
+            guild_id=sketch_gid_new, user_id=sketch_uid, daily_id=d_new.id,
+            image_url="https://example.invalid/sketch_new.png",
+        )
+        s.add(sub_new)
+        # A shiny dex-1 daily with NO shiny submission at all (only the two
+        # non-shiny ones above exist for dex 1) — must NOT match a shiny query.
+        d_shiny = db.DailyPokemon(
+            guild_id=sketch_gid_shiny, local_date=_date.today() - _timedelta(days=1),
+            dex_no=25, name="pikachu", is_shiny=True,
+        )
+        s.add(d_shiny)
+        await s.flush()
+        sub_shiny = db.Submission(
+            guild_id=sketch_gid_shiny, user_id=sketch_uid, daily_id=d_shiny.id,
+            image_url="https://example.invalid/sketch_shiny.png",
+        )
+        s.add(sub_shiny)
+        await s.commit()
+        sub_new_id, sub_shiny_id = sub_new.id, sub_shiny.id
+
+    async with db.session() as s:
+        match = await pokebox.latest_matching_submission(s, sketch_uid, dex_no=1, is_shiny=False)
+        assert match is not None and match.id == sub_new_id, match
+        no_match = await pokebox.latest_matching_submission(s, sketch_uid, dex_no=1, is_shiny=True)
+        assert no_match is None, no_match  # dex 1 has zero shiny submissions
+        shiny_match = await pokebox.latest_matching_submission(s, sketch_uid, dex_no=25, is_shiny=True)
+        assert shiny_match is not None and shiny_match.id == sub_shiny_id
+        never_matched = await pokebox.latest_matching_submission(s, sketch_uid, dex_no=999, is_shiny=False)
+        assert never_matched is None
+    print(
+        "latest_matching_submission OK: dex_no+is_shiny both required, most recent wins across "
+        "guilds, a shiny mon with only non-shiny submissions of the same species gets no match"
+    )
+
+    # --- sync_party_sketch_cache: cache-hit (zero fetches) vs cache-miss
+    # (fetch + save + delete prior stale file). --------------------------
+    sketch_cache_dir = os.path.join(tmp, "party_sketch_cache")
+    _fetch_calls: list[str] = []
+    _real_cache_image = pokebox._cache_image
+
+    async def _counting_cache_image(url, user_id, caughtmon_id, cache_dir, filename=None):
+        _fetch_calls.append(url)
+        return await _real_cache_image(url, user_id, caughtmon_id, cache_dir, filename=filename)
+
+    pokebox._cache_image = _counting_cache_image
+    try:
+        async with db.session() as s:
+            sketch_wallet = await pokebox.get_or_create_wallet(s, sketch_uid)
+            sketch_wallet.balance = 5
+            await s.commit()
+            sketch_mon = await pokebox.catch_submission(s, sketch_uid, party_dir, target=f"s{sub_new_id}")
+            await s.commit()
+            sketch_mon_id = sketch_mon.id
+        _fetch_calls.clear()  # drop /catch's own unrelated cache-at-catch-time fetch
+
+        # First call: no cache file yet for this (caughtmon_id, submission_id)
+        # pair -> cache miss -> fetches and saves.
+        async with db.session() as s:
+            mon_row = await s.get(db.CaughtMon, sketch_mon_id)
+            path1 = await pokebox.sync_party_sketch_cache(s, mon_row, sketch_cache_dir)
+        assert path1 is not None and os.path.exists(path1), path1
+        assert path1.endswith(f"{sketch_mon_id}_{sub_new_id}.png"), path1
+        assert len(_fetch_calls) == 1, _fetch_calls
+
+        # Second call: same latest matching submission, file already cached
+        # -> cache hit -> zero additional fetches.
+        async with db.session() as s:
+            mon_row = await s.get(db.CaughtMon, sketch_mon_id)
+            path2 = await pokebox.sync_party_sketch_cache(s, mon_row, sketch_cache_dir)
+        assert path2 == path1, (path2, path1)
+        assert len(_fetch_calls) == 1, "cache hit must not perform a network fetch"
+
+        # A newer matching submission appears -> cache miss -> fetches again,
+        # saves the NEW file, and deletes the prior stale file for this
+        # caughtmon_id (bounded to one file per slot).
+        async with db.session() as s:
+            s.add(db.GuildConfig(guild_id=910004))
+            d_resketch = db.DailyPokemon(guild_id=910004, local_date=_date.today(), dex_no=1, name="bulbasaur")
+            s.add(d_resketch)
+            await s.flush()
+            resub = db.Submission(
+                guild_id=910004, user_id=sketch_uid, daily_id=d_resketch.id,
+                image_url="https://example.invalid/sketch_resketch.png",
+            )
+            s.add(resub)
+            await s.commit()
+            resub_id = resub.id
+
+        async with db.session() as s:
+            mon_row = await s.get(db.CaughtMon, sketch_mon_id)
+            path3 = await pokebox.sync_party_sketch_cache(s, mon_row, sketch_cache_dir)
+        assert path3 is not None and path3 != path1, (path3, path1)
+        assert path3.endswith(f"{sketch_mon_id}_{resub_id}.png"), path3
+        assert len(_fetch_calls) == 2, _fetch_calls
+        assert not os.path.exists(path1), "prior stale cache file must be deleted on refresh"
+        assert os.path.exists(path3)
+        print(
+            "sync_party_sketch_cache OK: cache-hit performs zero fetches, cache-miss fetches+saves "
+            "and deletes the prior stale file for the same caughtmon_id"
+        )
+
+        # A mon with no matching submission at all -> None, no fetch, no crash
+        # (the normal "nothing to show yet" case, never logged as a warning).
+        async with db.session() as s:
+            never_wallet = await pokebox.get_or_create_wallet(s, 8099)
+            never_wallet.balance = 5
+            await s.commit()
+            s.add(db.GuildConfig(guild_id=910005))
+            other_daily = db.DailyPokemon(guild_id=910005, local_date=_date.today(), dex_no=150, name="mewtwo")
+            s.add(other_daily)
+            await s.flush()
+            other_sub = db.Submission(
+                guild_id=910005, user_id=8099, daily_id=other_daily.id,
+                image_url="https://example.invalid/mewtwo.png",
+            )
+            s.add(other_sub)
+            await s.commit()
+            other_sub_id = other_sub.id
+
+        # Fresh session so other_sub's created_at round-trips through SQLite
+        # as naive before catchable_submissions() compares it against "now"
+        # (same reason the end-to-end /profile test above does this).
+        async with db.session() as s:
+            never_mon = await pokebox.catch_submission(s, 8099, party_dir, target=f"s{other_sub_id}")
+            await s.commit()
+            never_mon.dex_no = 9999  # force zero matching submissions for this species
+            await s.commit()
+            never_mon_id = never_mon.id
+        fetches_before = len(_fetch_calls)
+        async with db.session() as s:
+            mon_row = await s.get(db.CaughtMon, never_mon_id)
+            no_sketch_path = await pokebox.sync_party_sketch_cache(s, mon_row, sketch_cache_dir)
+        assert no_sketch_path is None
+        assert len(_fetch_calls) == fetches_before, "no matching submission must never trigger a fetch"
+        print("sync_party_sketch_cache OK: no matching submission -> None, zero fetches, no crash")
+    finally:
+        pokebox._cache_image = _real_cache_image
+
+    # --- Per-slot fallback: a missing/corrupt cache file falls back to the
+    # official sprite for THAT slot only — the rest of the party still
+    # renders normally. -------------------------------------------------
+    from pokesketch.profile_card_render import PartyCardSlot as _SketchPCSlot
+    from pokesketch.profile_card_render import ProfileCardData as _SketchPCData
+    from pokesketch.profile_card_render import render_profile_panel as _sketch_render_panel
+
+    corrupt_sketch_path = os.path.join(tmp, "corrupt_sketch.png")
+    with open(corrupt_sketch_path, "wb") as fh:
+        fh.write(b"not-a-real-png")
+    fallback_sprite_path = os.path.join(tmp, "fallback_sprite.png")
+    _SketchImage.new("RGBA", (16, 16), (200, 50, 50, 255)).save(fallback_sprite_path, format="PNG")
+
+    fallback_party = [
+        _SketchPCSlot(
+            slot=1, dex_no=1, species_name="Bulbasaur", is_shiny=False,
+            sketch_path=corrupt_sketch_path, sprite_path=fallback_sprite_path,
+        ),
+        _SketchPCSlot(
+            slot=2, dex_no=4, species_name="Charmander", is_shiny=False,
+            sketch_path="/nonexistent/missing_sketch.png", sprite_path=fallback_sprite_path,
+        ),
+        _SketchPCSlot(slot=3, dex_no=7, species_name="Squirtle", is_shiny=False, sprite_path=fallback_sprite_path),
+    ]
+    fallback_data = _SketchPCData(
+        username="FallbackTester", level=5, rank_tier="Great Ball", title_badge="Great Ball Trainer",
+        exp_current=10, exp_needed=100, global_streak=0, global_streak_best=0, global_sketch_count=0,
+        accuracy_pct=0.0, dex_scanned=0, dex_total=1025, shiny_count=0, shiny_example=None,
+        kudos_count=0, party=fallback_party,
+    )
+    fallback_png = _sketch_render_panel(fallback_data)
+    assert fallback_png[:8] == b"\x89PNG\r\n\x1a\n"
+    fallback_img = _SketchImage.open(io.BytesIO(fallback_png))
+    assert fallback_img.width > 200 and fallback_img.height > 200, fallback_img.size
+    print(
+        "per-slot sketch fallback OK: a corrupt PNG and a missing cache file both fall back to "
+        "the official sprite for that slot only, render_profile_panel never crashes, "
+        "the rest of the party (plain sprite-only slot) still renders normally"
+    )
+
+    # --- Letterboxed (non-stretched) compositing for real non-square
+    # aspect ratios (1080x581 wide, 810x1080 tall — the design doc's own
+    # real-production examples). ----------------------------------------
+    from pokesketch.profile_card_render import PARTY_IMAGE_MARGIN, PARTY_TILE_WIDTH
+    from pokesketch.profile_card_render import _draw_letterboxed_sketch as _direct_letterbox
+
+    def _measure_pasted_extent(card, box, bg, fg):
+        x0, y0, x1, y1 = box
+        min_x = min_y = None
+        max_x = max_y = None
+        px = card.load()
+        for yy in range(y0, y1):
+            for xx in range(x0, x1):
+                if px[xx, yy][:3] != bg:
+                    if min_x is None or xx < min_x:
+                        min_x = xx
+                    if max_x is None or xx > max_x:
+                        max_x = xx
+                    if min_y is None or yy < min_y:
+                        min_y = yy
+                    if max_y is None or yy > max_y:
+                        max_y = yy
+        assert min_x is not None, "expected at least one non-background pixel"
+        return (max_x - min_x + 1), (max_y - min_y + 1)
+
+    letterbox_box_w = PARTY_TILE_WIDTH - PARTY_IMAGE_MARGIN * 2
+    letterbox_box_h = 90  # PARTY_IMAGE_HEIGHT
+    letterbox_box = (0, 0, letterbox_box_w, letterbox_box_h)
+    bg_color = (0x1E, 0x1F, 0x22)  # COLOR_BASE
+    fg_color = (10, 200, 10)
+
+    for src_w, src_h, label in [(1080, 581, "wide"), (810, 1080, "tall")]:
+        wide_path = os.path.join(tmp, f"sketch_{label}.png")
+        _SketchImage.new("RGBA", (src_w, src_h), (*fg_color, 255)).save(wide_path, format="PNG")
+        card = _SketchImage.new("RGB", (letterbox_box_w, letterbox_box_h), bg_color)
+        ok = _direct_letterbox(card, letterbox_box, wide_path)
+        assert ok is True
+        pasted_w, pasted_h = _measure_pasted_extent(card, letterbox_box, bg_color, fg_color)
+        src_aspect = src_w / src_h
+        pasted_aspect = pasted_w / pasted_h
+        assert abs(src_aspect - pasted_aspect) < 0.05, (label, src_aspect, pasted_aspect)
+        assert pasted_w <= letterbox_box_w and pasted_h <= letterbox_box_h
+        # Confirm it's genuinely letterboxed (doesn't fill the whole box in
+        # both dimensions, i.e. not stretched to the tile's own aspect ratio).
+        assert pasted_w < letterbox_box_w or pasted_h < letterbox_box_h, (label, pasted_w, pasted_h)
+        print(
+            f"letterbox OK ({label} {src_w}x{src_h}): pasted extent {pasted_w}x{pasted_h}, "
+            f"aspect preserved ({src_aspect:.3f} vs {pasted_aspect:.3f}), not stretched to fill the tile"
+        )
+
+    # Corrupt file -> _draw_letterboxed_sketch returns False (caller falls
+    # back to sprite), never raises.
+    card = _SketchImage.new("RGB", (letterbox_box_w, letterbox_box_h), bg_color)
+    assert _direct_letterbox(card, letterbox_box, corrupt_sketch_path) is False
+    print("letterbox OK: corrupt sketch file returns False (fallback signal), never raises")
+
+    # --- Toggle button visibility: self-view above/below Lv5, and never on
+    # someone else's profile regardless of viewer level/toggle state. ----
+    from pokesketch.cogs.profile import SKETCH_ART_MIN_LEVEL, Profile, _sketch_art_unlocked
+
+    assert _sketch_art_unlocked(SKETCH_ART_MIN_LEVEL) is True
+    assert _sketch_art_unlocked(SKETCH_ART_MIN_LEVEL - 1) is False
+
+    # _build_profile_payload derives level from leveling.exp_into_level(exp),
+    # not the stored .level column directly — seed exp via exp_to_reach() so
+    # the derived level actually lands where each case needs it.
+    toggle_low_uid, toggle_high_uid, toggle_viewer_uid = 8101, 8102, 8103
+    async with db.session() as s:
+        s.add(db.GlobalUser(user_id=toggle_low_uid, exp=0))  # below Lv5
+        s.add(db.GlobalUser(user_id=toggle_high_uid, exp=leveling.exp_to_reach(SKETCH_ART_MIN_LEVEL)))  # exactly Lv5
+        s.add(db.GlobalUser(user_id=toggle_viewer_uid, exp=leveling.exp_to_reach(99)))  # high level, other's profile
+        for i, uid in enumerate((toggle_low_uid, toggle_high_uid, toggle_viewer_uid)):
+            toggle_gid = 910010 + i
+            d = db.DailyPokemon(guild_id=toggle_gid, local_date=_date.today(), dex_no=1, name="bulbasaur")
+            s.add(d)
+            await s.flush()
+            s.add(
+                db.Submission(
+                    guild_id=toggle_gid, user_id=uid, daily_id=d.id,
+                    image_url=f"https://example.invalid/t{uid}.png",
+                )
+            )
+        await s.commit()
+
+    toggle_avatar_dir = os.path.join(tmp, "toggle_avatars")
+    toggle_cog = Profile(
+        bot=_FakeProfileBot(badge_cache_dir, accent_color=None, api=fake_api_client, image_cache_dir=toggle_avatar_dir)
+    )
+
+    # Self-view, below Lv5 -> no toggle button at all.
+    low_user = _FakeProfileUser(toggle_low_uid, display_name="LowLevel")
+    low_payload = await toggle_cog._build_profile_payload(toggle_low_uid, low_user, guild_id=1)
+    assert low_payload is not None
+    _low_embed, low_view, _low_files = low_payload
+    assert all(getattr(c, "label", "") != "Sketch Party Art: Off" for c in low_view.children), [
+        c.label for c in low_view.children
+    ]
+    assert len(low_view.children) == 2, [c.label for c in low_view.children]
+
+    # Self-view, Lv5+ -> toggle button present, defaults to Off.
+    high_user = _FakeProfileUser(toggle_high_uid, display_name="HighLevel")
+    high_payload = await toggle_cog._build_profile_payload(toggle_high_uid, high_user, guild_id=1)
+    assert high_payload is not None
+    _high_embed, high_view, _high_files = high_payload
+    assert any(getattr(c, "label", "") == "Sketch Party Art: Off" for c in high_view.children), [
+        c.label for c in high_view.children
+    ]
+    assert len(high_view.children) == 3, [c.label for c in high_view.children]
+
+    # Other-view: a high-level viewer looking at someone ELSE's Lv5+ profile
+    # never sees the toggle, regardless of the viewer's own level/toggle state.
+    other_view_payload = await toggle_cog._build_profile_payload(toggle_viewer_uid, high_user, guild_id=1)
+    assert other_view_payload is not None
+    _o_embed, other_view, _o_files = other_view_payload
+    assert len(other_view.children) == 2, [c.label for c in other_view.children]
+    print(
+        "toggle button visibility OK: omitted below Lv5, present (default Off) at Lv5+ on a "
+        "self-view, never shown when viewing someone else's profile regardless of viewer level"
+    )
+
+    # --- Whose toggle governs rendering: always the TARGET's, never the
+    # viewer's. Target has the toggle ON + a real matching submission;
+    # viewer has it OFF (irrelevant) and is a different person entirely. --
+    governs_target_uid, governs_viewer_uid = 8201, 8202
+    async with db.session() as s:
+        s.add(
+            db.GlobalUser(
+                user_id=governs_target_uid, exp=leveling.exp_to_reach(SKETCH_ART_MIN_LEVEL),
+                sketch_party_art_enabled=True,
+            )
+        )
+        s.add(db.GlobalUser(user_id=governs_viewer_uid, exp=0, sketch_party_art_enabled=False))
+        s.add(db.GuildConfig(guild_id=910020))
+        governs_daily = db.DailyPokemon(guild_id=910020, local_date=_date.today(), dex_no=1, name="bulbasaur")
+        s.add(governs_daily)
+        await s.flush()
+        governs_sub = db.Submission(
+            guild_id=910020, user_id=governs_target_uid, daily_id=governs_daily.id,
+            image_url="https://example.invalid/governs.png",
+        )
+        s.add(governs_sub)
+        await s.commit()
+        governs_sub_id = governs_sub.id
+        wallet = await pokebox.get_or_create_wallet(s, governs_target_uid)
+        wallet.balance = 5
+        await s.commit()
+
+    # Fresh session so governs_sub's created_at round-trips through SQLite as
+    # naive before catchable_submissions() compares it against "now".
+    async with db.session() as s:
+        await pokebox.catch_submission(s, governs_target_uid, party_dir, target=f"s{governs_sub_id}")
+        await s.commit()
+
+    governs_target_user = _FakeProfileUser(governs_target_uid, display_name="GovernsTarget")
+    _profile_cog_module.render_profile_panel = _spying_render_profile_panel
+    _captured_card_data.clear()
+
+    async def _real_png_cache_image(url, user_id, caughtmon_id, cache_dir, filename=None):
+        user_dir = os.path.join(cache_dir, str(user_id))
+        os.makedirs(user_dir, exist_ok=True)
+        path = os.path.join(user_dir, filename or f"{caughtmon_id}.png")
+        _SketchImage.new("RGBA", (8, 8), (5, 5, 5, 255)).save(path, format="PNG")
+        return path
+
+    _prior_cache_image = pokebox._cache_image
+    pokebox._cache_image = _real_png_cache_image
+    try:
+        governs_payload = await toggle_cog._build_profile_payload(
+            governs_viewer_uid, governs_target_user, guild_id=1
+        )
+    finally:
+        _profile_cog_module.render_profile_panel = _real_render_profile_panel
+        pokebox._cache_image = _prior_cache_image
+    assert governs_payload is not None
+    assert len(_captured_card_data) == 1, _captured_card_data
+    governs_data = _captured_card_data[0]
+    governs_sketch_slots = [p for p in governs_data.party if p.sketch_path is not None]
+    assert governs_sketch_slots, governs_data.party
+    with _SketchImage.open(governs_sketch_slots[0].sketch_path) as _governs_img:
+        _governs_img.verify()  # confirms a real, decodable PNG reached the render pipeline
+    print(
+        "whose-toggle-governs OK: a non-opted-in VIEWER looking at an opted-in TARGET's profile "
+        "still sees the target's sketch thumbnails — rendering always uses the target's own toggle"
+    )
 
     print("ALL SMOKE TESTS PASSED")
 

@@ -88,6 +88,19 @@ log = logging.getLogger(__name__)
 KUDOS_VIEW_TIMEOUT = 600.0  # 10 minutes — see module docstring's "View persistence" note.
 MAX_PARTY_LINES = 6
 
+# Own-Sketch Party Thumbnails: Lv5 ("Great Ball" tier) gate for the toggle
+# button — see the design doc's locked decisions.
+SKETCH_ART_MIN_LEVEL = 5
+
+
+def _sketch_art_unlocked(level: int) -> bool:
+    """Standalone boolean check for the sketch-party-art toggle's Lv5+ gate —
+    kept as its own function (not inlined at call sites) so a future premium
+    tier can layer on as e.g. `premium or _sketch_art_unlocked(level)` without
+    a rearchitecture. No premium/paid infrastructure exists or is built here;
+    this is a placement seam only, per the design doc's locked decision."""
+    return level >= SKETCH_ART_MIN_LEVEL
+
 
 async def _get_avatar_path(bot: commands.Bot, user: discord.abc.User) -> str | None:
     """Fetch (once) + cache-to-disk-forever the target's Discord avatar PNG,
@@ -169,6 +182,7 @@ def _build_card_data(
     upvotes_received_count: int,
     party: list[db.CaughtMon],
     sprite_paths: dict[int, str | None],
+    sketch_paths: dict[int, str | None],
     server_level: int | None,
     server_streak: int | None,
     server_streak_best: int | None,
@@ -194,6 +208,7 @@ def _build_card_data(
             is_shiny=mon.is_shiny,
             nickname=mon.nickname,
             sprite_path=sprite_paths.get(mon.slot),
+            sketch_path=sketch_paths.get(mon.slot),
             mon_level=mon.mon_level,
             mon_exp=mon.mon_exp,
         )
@@ -256,12 +271,28 @@ class ProfileView(discord.ui.View):
     Neither is author-locked — a profile is meant to be viewed and kudos'd
     by anyone who sees it, not just the person who ran the command."""
 
-    def __init__(self, bot: commands.Bot, target_id: int, target_display_name: str) -> None:
+    def __init__(
+        self,
+        bot: commands.Bot,
+        target_id: int,
+        target_display_name: str,
+        *,
+        show_sketch_toggle: bool = False,
+        sketch_enabled: bool = False,
+    ) -> None:
         super().__init__(timeout=KUDOS_VIEW_TIMEOUT)
         self.bot = bot
         self.target_id = target_id
         self.target_display_name = target_display_name
         self.message: discord.Message | None = None
+        # Sketch Party Art toggle: only shown on the target's OWN self-view of
+        # their /profile (never on someone else's card, regardless of the
+        # viewer's own level/toggle state) AND only at Lv5+ — omitted
+        # entirely below the gate, not shown-and-disabled.
+        if show_sketch_toggle:
+            self.toggle_sketch_art.label = f"Sketch Party Art: {'On' if sketch_enabled else 'Off'}"
+        else:
+            self.remove_item(self.toggle_sketch_art)
 
     async def on_timeout(self) -> None:
         for item in self.children:
@@ -319,49 +350,71 @@ class ProfileView(discord.ui.View):
         button.label = f"Give Kudos ({count})"
         await interaction.response.edit_message(view=self)
 
+    @discord.ui.button(label="Sketch Party Art: Off", style=discord.ButtonStyle.secondary, emoji="🎨")
+    async def toggle_sketch_art(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        # Self-view-only per the button's visibility gate, but re-checked
+        # here too — a stale/forwarded interaction should never flip someone
+        # else's setting.
+        if interaction.user.id != self.target_id:
+            await interaction.response.send_message(
+                "You can only toggle your own Sketch Party Art setting.", ephemeral=True
+            )
+            return
+        async with db.session() as s:
+            global_row = (
+                await s.execute(select(db.GlobalUser).where(db.GlobalUser.user_id == self.target_id))
+            ).scalar_one()
+            global_row.sketch_party_art_enabled = not global_row.sketch_party_art_enabled
+            await s.commit()
+
+        cog: Profile = self.bot.get_cog("Profile")
+        payload = await cog._build_profile_payload(interaction.user.id, interaction.user, interaction.guild_id)
+        if payload is None:
+            await interaction.response.send_message("Couldn't re-render your profile.", ephemeral=True)
+            return
+        embed, view, files = payload
+        view.message = self.message
+        await interaction.response.edit_message(embed=embed, view=view, attachments=files)
+
 
 class Profile(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    @app_commands.command(
-        name="profile",
-        description="Your (or someone's) level, rank, stats, party, and kudos.",
-    )
-    @app_commands.describe(user="Whose profile to show (default: you)")
-    async def profile(self, interaction: discord.Interaction, user: discord.User | None = None) -> None:
-        # More DB queries than either of the two commands this replaces had
-        # alone (per-server AND global stats, accuracy%, dex%, shiny query,
-        # kudos count) — defer proactively, same posture PR #8 already used.
-        await interaction.response.defer(thinking=True)
+    async def _build_profile_payload(
+        self, invoker_id: int, target: discord.abc.User, guild_id: int | None
+    ) -> tuple[discord.Embed, ProfileView, list[discord.File]] | None:
+        """Build the (embed, view, files) triple for a /profile render.
 
-        target = user or interaction.user
+        Shared by the initial `/profile` command and the Sketch Party Art
+        toggle button's edit-in-place re-render, so both paths render
+        identically — the toggle button's re-render must reflect the SAME
+        rendering logic the initial command used, including whichever party
+        slots do/don't have a matching sketch. Returns None if `target` has
+        no GlobalUser row yet (no submissions ever) — caller shows a plain
+        error message.
+        """
         async with db.session() as s:
             global_row = (
                 await s.execute(select(db.GlobalUser).where(db.GlobalUser.user_id == target.id))
             ).scalar_one_or_none()
 
             if global_row is None:
-                await interaction.followup.send(
-                    f"{target.display_name} hasn't submitted any sketches yet.", ephemeral=True
-                )
-                return
+                return None
 
             server_row = None
             server_sub_count = 0
-            if interaction.guild_id is not None:
+            if guild_id is not None:
                 server_row = (
                     await s.execute(
-                        select(db.User).where(
-                            db.User.guild_id == interaction.guild_id, db.User.user_id == target.id
-                        )
+                        select(db.User).where(db.User.guild_id == guild_id, db.User.user_id == target.id)
                     )
                 ).scalar_one_or_none()
                 if server_row is not None:
                     server_sub_count = (
                         await s.execute(
                             select(func.count(db.Submission.id)).where(
-                                db.Submission.guild_id == interaction.guild_id,
+                                db.Submission.guild_id == guild_id,
                                 db.Submission.user_id == target.id,
                             )
                         )
@@ -416,6 +469,29 @@ class Profile(commands.Cog):
                 )
                 sprite_paths[mon.slot] = None
 
+        # Own-Sketch Party Thumbnails: always the TARGET's own toggle state
+        # (global_row is the target's GlobalUser row), never the viewer's —
+        # a viewer never controls how someone else's profile renders. Runs
+        # in its own session (the party rows are already detached, but the
+        # query itself needs a live session) — a per-slot failure (fetch,
+        # decode, cache-file issue) drops just that slot's sketch, never the
+        # whole party; the "no matching submission" case returns None and is
+        # NOT logged, since that's expected, not a bug.
+        sketch_paths: dict[int, str | None] = {}
+        if global_row.sketch_party_art_enabled:
+            async with db.session() as sketch_s:
+                for mon in party[:MAX_PARTY_LINES]:
+                    try:
+                        sketch_paths[mon.slot] = await pokebox.sync_party_sketch_cache(
+                            sketch_s, mon, self.bot.config.party_sketch_cache_dir
+                        )
+                    except Exception:
+                        log.warning(
+                            "Failed to sync sketch party art for user_id=%s caughtmon_id=%s",
+                            mon.user_id, mon.id, exc_info=True,
+                        )
+                        sketch_paths[mon.slot] = None
+
         emblem_path = await rank_badges.get_tier_emblem(rank_tier, self.bot.config.badge_cache_dir)
         emblem_filename = "tier_emblem.png"
         emblem_file = discord.File(emblem_path, filename=emblem_filename)
@@ -461,6 +537,7 @@ class Profile(commands.Cog):
             upvotes_received_count=upvotes_received_count,
             party=party,
             sprite_paths=sprite_paths,
+            sketch_paths=sketch_paths,
             server_level=server_level,
             server_streak=server_streak,
             server_streak_best=server_streak_best,
@@ -475,10 +552,36 @@ class Profile(commands.Cog):
 
         embed.set_footer(text="PokeSketchDex")
 
-        view = ProfileView(self.bot, target.id, target.display_name)
+        show_sketch_toggle = invoker_id == target.id and _sketch_art_unlocked(level)
+        view = ProfileView(
+            self.bot, target.id, target.display_name,
+            show_sketch_toggle=show_sketch_toggle,
+            sketch_enabled=global_row.sketch_party_art_enabled,
+        )
         view.give_kudos.label = f"Give Kudos ({kudos_count})"
 
-        await interaction.followup.send(embed=embed, view=view, files=[emblem_file, card_file])
+        return embed, view, [emblem_file, card_file]
+
+    @app_commands.command(
+        name="profile",
+        description="Your (or someone's) level, rank, stats, party, and kudos.",
+    )
+    @app_commands.describe(user="Whose profile to show (default: you)")
+    async def profile(self, interaction: discord.Interaction, user: discord.User | None = None) -> None:
+        # More DB queries than either of the two commands this replaces had
+        # alone (per-server AND global stats, accuracy%, dex%, shiny query,
+        # kudos count) — defer proactively, same posture PR #8 already used.
+        await interaction.response.defer(thinking=True)
+
+        target = user or interaction.user
+        payload = await self._build_profile_payload(interaction.user.id, target, interaction.guild_id)
+        if payload is None:
+            await interaction.followup.send(
+                f"{target.display_name} hasn't submitted any sketches yet.", ephemeral=True
+            )
+            return
+        embed, view, files = payload
+        await interaction.followup.send(embed=embed, view=view, files=files)
         view.message = await interaction.original_response()
 
 

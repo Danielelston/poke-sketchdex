@@ -302,10 +302,20 @@ def _next_free_slot(taken: set[int], upper: int) -> int | None:
     return None
 
 
-async def _cache_image(url: str, user_id: int, caughtmon_id: int, cache_dir: str) -> str:
+async def _cache_image(
+    url: str, user_id: int, caughtmon_id: int, cache_dir: str, filename: str | None = None
+) -> str:
+    """Fetch `url` and save it, normalized, under `cache_dir/{user_id}/`.
+
+    `filename` defaults to `{caughtmon_id}.png` (the original /catch cache
+    naming) but callers needing a different naming convention — e.g. the
+    Own-Sketch Party Thumbnails cache's `{caughtmon_id}_{submission_id}.png`
+    (see sync_party_sketch_cache) — can override it, reusing this fetch/
+    normalize/save pipeline instead of reimplementing it.
+    """
     user_dir = os.path.join(cache_dir, str(user_id))
     os.makedirs(user_dir, exist_ok=True)
-    path = os.path.join(user_dir, f"{caughtmon_id}.png")
+    path = os.path.join(user_dir, filename or f"{caughtmon_id}.png")
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url)
         resp.raise_for_status()
@@ -706,6 +716,92 @@ async def mon_for_submission(s, submission_id: int, *, wild: bool) -> CaughtMon 
     return (
         await s.execute(select(CaughtMon).where(column == submission_id))
     ).scalar_one_or_none()
+
+
+# --- Own-Sketch Party Thumbnails (see design doc of the same name) ---
+
+# Prefix + suffix of the lazy-refresh cache filename convention:
+# data/party_sketch_cache/{user_id}/{caughtmon_id}_{submission_id}.png
+
+
+async def latest_matching_submission(s, user_id: int, dex_no: int, is_shiny: bool) -> Submission | None:
+    """The user's most recent Submission (any guild) whose DailyPokemon
+    dex_no AND is_shiny both match the given caught mon's species/shininess,
+    or None if no such submission exists.
+
+    A shiny-caught mon only ever matches a shiny-tagged submission of the
+    same species — never a non-shiny sketch of the same species, even a more
+    recent one. No existing helper joins Submission -> DailyPokemon this way
+    (Submission has no direct CaughtMon link), so this is new.
+    """
+    return (
+        await s.execute(
+            select(Submission)
+            .join(DailyPokemon, DailyPokemon.id == Submission.daily_id)
+            .where(
+                Submission.user_id == user_id,
+                DailyPokemon.dex_no == dex_no,
+                DailyPokemon.is_shiny == is_shiny,
+            )
+            .order_by(desc(Submission.created_at))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+def _delete_stale_sketch_cache_files(user_dir: str, caughtmon_id: int, keep_filename: str) -> None:
+    """Remove any previously-cached sketch file for this caughtmon_id other
+    than `keep_filename`, keeping the cache bounded to one file per active
+    party slot with the toggle on (not one per historical submission)."""
+    prefix = f"{caughtmon_id}_"
+    try:
+        names = os.listdir(user_dir)
+    except FileNotFoundError:
+        return
+    for name in names:
+        if name.startswith(prefix) and name != keep_filename:
+            delete_cached_file(os.path.join(user_dir, name))
+
+
+async def sync_party_sketch_cache(s, mon: CaughtMon, cache_dir: str) -> str | None:
+    """Lazy refresh, cache-by-submission-id: return the local path to use for
+    `mon`'s own-sketch party thumbnail, or None if no matching submission
+    exists at all yet (a normal, expected case — NOT logged; see per-slot
+    fallback in profile_card_render.py, which falls back to the sprite for
+    this slot on a None return, same as on a load failure).
+
+    Cache hit (a file for the latest matching submission id already exists
+    under data/party_sketch_cache/{user_id}/{caughtmon_id}_{submission_id}.png)
+    performs zero network calls. Cache miss (the latest matching submission
+    id is newer than whatever is cached, or nothing is cached yet) fetches
+    via _cache_image/_normalize_and_save (reused, not reimplemented) and
+    deletes the prior stale file for this caughtmon_id on success.
+    """
+    sub = await latest_matching_submission(s, mon.user_id, mon.dex_no, mon.is_shiny)
+    if sub is None:
+        return None  # no matching submission — normal, silent fallback to sprite.
+
+    user_dir = os.path.join(cache_dir, str(mon.user_id))
+    target_filename = f"{mon.id}_{sub.id}.png"
+    target_path = os.path.join(user_dir, target_filename)
+    if os.path.exists(target_path):
+        return target_path  # cache hit — zero fetches.
+
+    try:
+        new_path = await _cache_image(sub.image_url, mon.user_id, mon.id, cache_dir, filename=target_filename)
+    except Exception:
+        log.warning(
+            "Failed to fetch/cache sketch party art: user_id=%s caughtmon_id=%s submission_id=%s",
+            mon.user_id, mon.id, sub.id, exc_info=True,
+        )
+        return None
+
+    log.info(
+        "Refreshed sketch party art cache: user_id=%s caughtmon_id=%s submission_id=%s",
+        mon.user_id, mon.id, sub.id,
+    )
+    _delete_stale_sketch_cache_files(user_dir, mon.id, keep_filename=target_filename)
+    return new_path
 
 
 async def award_mon_exp_to_party(s, mons: list[CaughtMon], amount: int) -> None:
