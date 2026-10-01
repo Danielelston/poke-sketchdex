@@ -344,6 +344,22 @@ class PokeSketchDexBot(commands.Bot):
             "on_interaction: type=%s data=%s message_id=%s",
             interaction.type, interaction.data, interaction.message.id if interaction.message else None,
         )
+        store = getattr(self, "_connection", None)
+        if store is not None and interaction.type == discord.InteractionType.component:
+            vs = store._view_store
+            msg_id = interaction.message.id if interaction.message else None
+            data = interaction.data or {}
+            key = (data.get("component_type"), data.get("custom_id"))
+            log.info(
+                "on_interaction diag: msg_id=%s key=%s at_msg_id=%s at_None=%s forms_view_cache_key=%s "
+                "forms_view_is_finished=%s forms_view_is_dispatching=%s",
+                msg_id, key,
+                list(vs._views.get(msg_id, {}).keys()),
+                list(vs._views.get(None, {}).keys()),
+                self.forms_button_view._cache_key,
+                self.forms_button_view.is_finished(),
+                self.forms_button_view.is_dispatching(),
+            )
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Sync commands to a newly-joined guild immediately, and seed its
