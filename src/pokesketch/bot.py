@@ -332,6 +332,19 @@ class PokeSketchDexBot(commands.Bot):
             await self._sync_all_joined_guilds()
             self._commands_synced = True
 
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        # TEMP DIAGNOSTIC: fires for every raw interaction (slash command,
+        # button, etc.) regardless of whether discord.py's view dispatcher
+        # finds a matching registered item -- see state.py's
+        # parse_interaction_create, which calls self.dispatch('interaction', ...)
+        # unconditionally after (not instead of) its own ViewStore.dispatch_view
+        # call. Used to confirm whether component-interaction payloads reach
+        # the gateway at all, independent of FormsButtonView's own routing.
+        log.info(
+            "on_interaction: type=%s data=%s message_id=%s",
+            interaction.type, interaction.data, interaction.message.id if interaction.message else None,
+        )
+
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Sync commands to a newly-joined guild immediately, and seed its
         built-in wild-encounter Events so they're ready even before /setup
