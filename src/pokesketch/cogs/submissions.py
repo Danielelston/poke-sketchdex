@@ -9,7 +9,7 @@ submission messages.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
@@ -18,6 +18,7 @@ from discord.ext import commands
 from sqlalchemy import func, select
 
 from .. import db, gym, leveling, pokebox
+from ..daily import WILD_ENCOUNTER_SUBMIT_WINDOW_HOURS
 from ..formatting import species_display_name
 
 log = logging.getLogger(__name__)
@@ -79,20 +80,29 @@ async def _award_exp(s, guild_id: int, user_id: int, kind: str, amount: int) -> 
 
 
 async def _find_wild_encounter_for_thread(
-    s, thread_id: int, guild_id: int, today_local: date
+    s, thread_id: int, guild_id: int
 ) -> db.WildEncounter | None:
-    """If `thread_id` is today's wild-encounter thread for this guild
+    """If `thread_id` is a wild-encounter thread for this guild
     (WildEncounter.thread_id — each day gets its own fresh thread), return
-    that row, or None if the thread doesn't match today's wild encounter."""
+    that row, or None if the thread doesn't match any wild encounter. Does
+    NOT check the submission window — see _is_wild_encounter_submit_window_closed,
+    checked separately by the caller."""
     return (
         await s.execute(
             select(db.WildEncounter).where(
                 db.WildEncounter.guild_id == guild_id,
                 db.WildEncounter.thread_id == thread_id,
-                db.WildEncounter.local_date == today_local,
             )
         )
     ).scalar_one_or_none()
+
+
+def _is_wild_encounter_submit_window_closed(wild_encounter: db.WildEncounter) -> bool:
+    """True once WILD_ENCOUNTER_SUBMIT_WINDOW_HOURS have elapsed since this
+    wild encounter's own post time (WildEncounter.created_at) — a fixed
+    duration, not a guild-local-midnight cutoff (see daily.py)."""
+    now = datetime.now(UTC).replace(tzinfo=None)
+    return now >= wild_encounter.created_at + timedelta(hours=WILD_ENCOUNTER_SUBMIT_WINDOW_HOURS)
 
 
 class Submissions(commands.Cog):
@@ -139,11 +149,18 @@ class Submissions(commands.Cog):
             cfg = await s.get(db.GuildConfig, gid)
             tz = cfg.timezone if cfg else "UTC"
             today_local = datetime.now(ZoneInfo(tz)).date()
-            wild_encounter = await _find_wild_encounter_for_thread(s, channel.id, gid, today_local)
+            wild_encounter = await _find_wild_encounter_for_thread(s, channel.id, gid)
             if wild_encounter is None:
                 await interaction.followup.send(
                     "This thread isn't a recognized daily or wild-encounter thread (or today's "
                     "wild encounter hasn't posted yet).",
+                    ephemeral=True,
+                )
+                return
+            if _is_wild_encounter_submit_window_closed(wild_encounter):
+                await interaction.followup.send(
+                    f"This wild encounter's `/submit` window closed "
+                    f"{WILD_ENCOUNTER_SUBMIT_WINDOW_HOURS}h after it was posted.",
                     ephemeral=True,
                 )
                 return
