@@ -312,8 +312,17 @@ class Admin(commands.Cog):
         )
 
     @app_commands.command(name="post-now", description="Post today's challenge immediately (admin/test).")
+    @app_commands.describe(
+        dex_no=(
+            "Optional: force this exact dex number instead of the normal random pick — e.g. to test "
+            "the alt-forms picker against a known multi-form species (try 774 Minior or 413 Wormadam). "
+            "Replaces today's post if one already exists, so you can re-run this multiple times."
+        )
+    )
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def post_now(self, interaction: discord.Interaction) -> None:
+    async def post_now(
+        self, interaction: discord.Interaction, dex_no: app_commands.Range[int, MIN_DEX_NO, MAX_DEX_NO] | None = None
+    ) -> None:
         await interaction.response.defer(ephemeral=True)
         async with db.session() as s:
             cfg = await s.get(db.GuildConfig, interaction.guild_id)
@@ -321,11 +330,14 @@ class Admin(commands.Cog):
             await interaction.followup.send("Run `/setup` first.", ephemeral=True)
             return
         local_date = datetime.now(ZoneInfo(cfg.timezone)).date()
-        posted = await post_daily_for_guild(self.bot, self.bot.api, interaction.guild_id, local_date)
-        await interaction.followup.send(
-            "✅ Posted." if posted else "Already posted today (or paused / no channel).",
-            ephemeral=True,
+        posted = await post_daily_for_guild(
+            self.bot, self.bot.api, interaction.guild_id, local_date, dex_no_override=dex_no
         )
+        if posted:
+            msg = f"✅ Posted with forced dex #{dex_no}." if dex_no is not None else "✅ Posted."
+        else:
+            msg = "Already posted today (or paused / no channel)."
+        await interaction.followup.send(msg, ephemeral=True)
 
     @app_commands.command(
         name="reset-pool",

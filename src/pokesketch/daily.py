@@ -125,8 +125,20 @@ async def post_daily_for_guild(
     api: PokeApiClient,
     guild_id: int,
     local_date: date,
+    *,
+    dex_no_override: int | None = None,
 ) -> bool:
-    """Post the daily challenge for one guild. Returns True if posted."""
+    """Post the daily challenge for one guild. Returns True if posted.
+
+    `dex_no_override` is an admin/test escape hatch (see `/post-now`'s
+    `dex_no` option) for forcing a specific species — e.g. to reproduce the
+    alt-forms picker against a known multi-form species in a test server,
+    without waiting on `pick_dex_no`'s normal rotation. When set, it also
+    bypasses the same-local-date idempotency guard below (deleting any
+    existing `DailyPokemon` row for that date first) so an admin can re-run
+    this repeatedly against different dex numbers in one day; the normal,
+    override-free path keeps the one-post-per-day guard untouched.
+    """
     async with db.session() as s:
         cfg = await s.get(db.GuildConfig, guild_id)
         if cfg is None or cfg.paused or not cfg.channel_id:
@@ -141,15 +153,25 @@ async def post_daily_for_guild(
             )
         ).scalar_one_or_none()
         if existing is not None:
-            log.info("Guild %s already has a daily for %s; skipping.", guild_id, local_date)
-            return False
+            if dex_no_override is None:
+                log.info("Guild %s already has a daily for %s; skipping.", guild_id, local_date)
+                return False
+            log.info(
+                "Guild %s: dex_no_override=%s given; replacing existing daily for %s.",
+                guild_id, dex_no_override, local_date,
+            )
+            await s.delete(existing)
+            await s.commit()
         channel_id, role_id = cfg.channel_id, cfg.role_id
         dex_min, dex_max, mode = cfg.dex_min, cfg.dex_max, cfg.selection_mode
         grace_period_days = cfg.grace_period_days
         catch_window_hours = cfg.catch_window_hours
         tz_name = cfg.timezone
 
-    dex_no = await pick_dex_no(guild_id, dex_min, dex_max, mode)
+    if dex_no_override is not None:
+        dex_no = dex_no_override
+    else:
+        dex_no = await pick_dex_no(guild_id, dex_min, dex_max, mode)
     ref = await api.get_pokemon(dex_no)
     shiny = random.random() < SHINY_CHANCE
     images = ref.reference_images(shiny=shiny)
