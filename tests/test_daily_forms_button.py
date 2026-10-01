@@ -325,3 +325,83 @@ def test_shiny_roll_is_not_rerolled_for_the_forms_lookup():
         await db.dispose()
 
     _run(scenario())
+
+
+def test_dex_no_override_forces_species_and_bypasses_pick_dex_no():
+    """/post-now's dex_no option (admin/test escape hatch for reproducing the
+    alt-forms picker against a known species) must post the forced dex
+    number, not whatever pick_dex_no would otherwise choose."""
+
+    async def scenario():
+        await _fresh_db()
+        guild_id = 9
+        async with db.session() as s:
+            # Configured range deliberately excludes 413 -- if the override
+            # didn't bypass pick_dex_no, this range would make 413 unreachable.
+            s.add(db.GuildConfig(guild_id=guild_id, channel_id=42, dex_min=1, dex_max=1, selection_mode="random"))
+            await s.commit()
+
+        channel = _FakeChannel(channel_id=42)
+        real_view = FormsButtonView()
+        client = _FakeClient(channel, forms_button_view=real_view)
+        api = _StubApi(_fake_ref(413), _species_forms(413, count=3))
+
+        posted = await post_daily_for_guild(client, api, guild_id, date(2026, 9, 25), dex_no_override=413)
+        assert posted is True
+        assert len(channel.sent_kwargs) == 1
+        assert channel.sent_kwargs[0]["view"] is real_view  # multi-form -> button attached
+
+        from sqlalchemy import select
+
+        async with db.session() as s:
+            daily = (await s.execute(select(db.DailyPokemon).where(db.DailyPokemon.guild_id == guild_id))).scalar_one()
+        assert daily.dex_no == 413
+
+        await db.dispose()
+
+    _run(scenario())
+
+
+def test_dex_no_override_replaces_an_existing_same_day_post():
+    """Unlike the normal path (idempotent: skips a second post the same
+    local_date), a dex_no_override re-run must replace the existing row so
+    an admin can re-test multiple dex numbers in one day without waiting."""
+
+    async def scenario():
+        await _fresh_db()
+        guild_id = 10
+        async with db.session() as s:
+            s.add(db.GuildConfig(guild_id=guild_id, channel_id=42, dex_min=1, dex_max=1, selection_mode="random"))
+            await s.commit()
+
+        channel = _FakeChannel(channel_id=42)
+        client = _FakeClient(channel, forms_button_view=FormsButtonView())
+        local_date = date(2026, 9, 25)
+
+        api_first = _StubApi(_fake_ref(1), _species_forms(1, count=1))
+        posted_first = await post_daily_for_guild(client, api_first, guild_id, local_date)
+        assert posted_first is True
+
+        # Normal re-run (no override) stays idempotent.
+        posted_again = await post_daily_for_guild(client, api_first, guild_id, local_date)
+        assert posted_again is False
+
+        api_override = _StubApi(_fake_ref(774), _species_forms(774, count=14))
+        posted_override = await post_daily_for_guild(
+            client, api_override, guild_id, local_date, dex_no_override=774
+        )
+        assert posted_override is True
+        assert len(channel.sent_kwargs) == 2  # first post + override post
+
+        from sqlalchemy import select
+
+        async with db.session() as s:
+            rows = (
+                await s.execute(select(db.DailyPokemon).where(db.DailyPokemon.guild_id == guild_id))
+            ).scalars().all()
+        assert len(rows) == 1, "override must replace, not duplicate, the day's row"
+        assert rows[0].dex_no == 774
+
+        await db.dispose()
+
+    _run(scenario())
