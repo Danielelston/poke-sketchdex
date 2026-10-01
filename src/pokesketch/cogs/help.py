@@ -153,7 +153,7 @@ class Help(commands.Cog):
             "pool), its own thread each day. `/submit` works there too, for bonus EXP (see "
             "⭐ above).\n\n"
             "-# Wild-encounter threads have **no grace-period backfill**: `/submit` there "
-            "only counts through the next guild-local midnight, unlike daily threads (see "
+            "only works for 24 hours after the thread posts, unlike daily threads (see "
             "⏳ below). Admins can also author custom Events with their own dex lists — see "
             "`/help-admin`.",
         )

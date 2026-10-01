@@ -19,6 +19,12 @@ log = logging.getLogger(__name__)
 
 SHINY_CHANCE = 1 / 40  # ~2.5% chance the daily reference is shiny
 
+# Fixed duration /submit stays open on a wild-encounter thread, counted from
+# that thread's own post time (NOT a guild-local-midnight cutoff like the
+# main daily's grace period) — see _wild_encounter_window_summary_line and
+# _find_wild_encounter_for_thread in submissions.py.
+WILD_ENCOUNTER_SUBMIT_WINDOW_HOURS = 24
+
 # Discord's actual supported auto-archive tiers, in minutes (1h/1d/3d/1wk) — no
 # arbitrary durations are allowed, so grace_period_days must snap to one of these.
 ARCHIVE_DURATION_TIERS = (60, 1440, 4320, 10080)
@@ -96,18 +102,20 @@ async def _forms_view_for_dex(client: discord.Client, api: PokeApiClient, dex_no
     return getattr(client, "forms_button_view", None)
 
 
-def _wild_encounter_window_summary_line(local_date: date, catch_window_hours: int, tz_name: str) -> str:
-    """Same idea as _window_summary_line, but wild-encounter threads have no
-    grace-period backfill at all: /submit only accepts same-guild-local-day
-    submissions (see _find_wild_encounter_for_thread in submissions.py), so
-    the submit deadline is simply the next guild-local midnight, not a
-    grace_period_days-based cutoff."""
+def _wild_encounter_window_summary_line(posted_at_utc: datetime, catch_window_hours: int) -> str:
+    """Same idea as _window_summary_line, but wild-encounter threads use a
+    fixed WILD_ENCOUNTER_SUBMIT_WINDOW_HOURS submission window counted from
+    this thread's own post time (`posted_at_utc`, naive-UTC) rather than a
+    guild-local-midnight cutoff — see _find_wild_encounter_for_thread in
+    submissions.py, which enforces this same deadline against
+    WildEncounter.created_at."""
     submit_deadline = pokebox.discord_timestamp(
-        _submit_deadline_utc(local_date, grace_period_days=0, tz_name=tz_name), style="R"
+        posted_at_utc + timedelta(hours=WILD_ENCOUNTER_SUBMIT_WINDOW_HOURS), style="R"
     )
     catch_label = pokebox.format_duration_label(catch_window_hours)
     return (
-        f"⏳ `/submit` only works here until {submit_deadline} (today only, no backfill) • "
+        f"⏳ `/submit` closes for this wild encounter {submit_deadline} "
+        f"({WILD_ENCOUNTER_SUBMIT_WINDOW_HOURS}h after posting) • "
         f"`/catch` closes {catch_label} after each sketch is submitted."
     )
 
@@ -234,7 +242,6 @@ async def post_wild_encounter_for_guild(
             return False  # idempotent: already posted today
         channel_id, weekly_vote_id = cfg.channel_id, wv.id
         catch_window_hours = cfg.catch_window_hours
-        tz_name = cfg.timezone
         theme_category, theme_choice_key = wv.category, wv.choice_key
 
     dex_no = random.choice(dex_pool)
@@ -256,6 +263,10 @@ async def post_wild_encounter_for_guild(
     if theme_category == weeklyvote.CATEGORY_TYPE and theme_choice_key:
         theme_emoji = weeklyvote.type_emoji(theme_choice_key)
         embed.set_footer(text=f"{theme_emoji} This week's theme: {theme_choice_key.title()}-type")
+    # Captured once, right before posting, so the deadline shown in the
+    # thread and the deadline enforced against WildEncounter.created_at (see
+    # _find_wild_encounter_for_thread in submissions.py) line up exactly.
+    posted_at = datetime.now(UTC).replace(tzinfo=None)
     msg = await channel.send(content="A wild Pokemon appeared!", embed=embed, view=forms_view)
 
     thread = None
@@ -266,7 +277,7 @@ async def post_wild_encounter_for_guild(
         )
         await thread.send(
             "Sketch it with `/submit`!\n"
-            f"{_wild_encounter_window_summary_line(local_date, catch_window_hours, tz_name)}"
+            f"{_wild_encounter_window_summary_line(posted_at, catch_window_hours)}"
         )
     except discord.DiscordException as exc:
         log.warning("Guild %s: could not create wild-encounter thread: %s", guild_id, exc)
@@ -281,6 +292,7 @@ async def post_wild_encounter_for_guild(
                 name=ref.name,
                 message_id=msg.id,
                 thread_id=thread.id if thread else None,
+                created_at=posted_at,
             )
         )
         await s.commit()

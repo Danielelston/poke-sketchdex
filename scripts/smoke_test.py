@@ -884,9 +884,11 @@ async def main() -> None:
     assert "`/catch` closes 7d after each sketch is submitted." in equal_line, equal_line
     print("daily window summary OK: equal submit/catch windows both render in day units")
 
-    wild_line = _wild_encounter_window_summary_line(_date2(2026, 9, 1), catch_window_hours=24, tz_name="UTC")
-    assert "only works here until <t:" in wild_line, wild_line
-    assert "today only, no backfill" in wild_line, wild_line
+    wild_line = _wild_encounter_window_summary_line(
+        _datetime(2026, 9, 1, 12, 0, 0), catch_window_hours=24
+    )
+    assert "`/submit` closes for this wild encounter <t:" in wild_line, wild_line
+    assert "24h after posting" in wild_line, wild_line
     assert "`/catch` closes 1d after each sketch is submitted." in wild_line, wild_line
     print(f"wild-encounter window summary OK: {wild_line}")
 
