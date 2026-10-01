@@ -47,14 +47,23 @@ class PokeSketchDexBot(commands.Bot):
         self.api = PokeApiClient(config.image_cache_dir)
         self.scheduler = AsyncIOScheduler()
         self._commands_synced = False
-        # The single persistent "View Alt Forms" view instance -- registered
-        # once via add_view in _register_persistent_views, then reused by
-        # daily.py when attaching the button to a new announcement message
-        # (constructing a fresh instance per message would still render, but
-        # would defeat the point of a persistent view; see FormsButtonView's
-        # docstring). Read by daily.py as `client.forms_button_view`, mirroring
-        # the existing `self.bot.api` duck-typed access pattern.
-        self.forms_button_view = FormsButtonView()
+        # The single persistent "View Alt Forms" view instance -- constructed
+        # and registered in setup_hook (_register_persistent_views), NOT here.
+        # discord.ui.View.__init__ calls asyncio.get_running_loop() to create
+        # its internal "stopped" future; __init__ runs before bot.run() starts
+        # the event loop, so building it here leaves that future permanently
+        # None. View._dispatch_item() then silently refuses to ever dispatch
+        # a click to this view's callbacks (`if self.__stopped is None: return
+        # None`, with no error/log) -- every "View Alt Forms" click failed
+        # this way in production (see git history around 2026-10-01's
+        # on_interaction diagnostics) while unit tests/proof scripts never
+        # caught it, since they call the button's .callback(...) directly and
+        # never go through real discord.py view-store dispatch. Reused by
+        # daily.py as `client.forms_button_view`, mirroring the existing
+        # `self.bot.api` duck-typed access pattern -- set to None here only so
+        # the attribute exists pre-setup_hook; real construction happens in
+        # _register_persistent_views, inside the running event loop.
+        self.forms_button_view: FormsButtonView | None = None
 
     async def setup_hook(self) -> None:
         db.init_engine(self.config.db_path)
@@ -77,12 +86,18 @@ class PokeSketchDexBot(commands.Bot):
         self.scheduler.start()
 
     def _register_persistent_views(self) -> None:
-        """Register every persistent view exactly once, before the gateway
-        needs to route any interaction to it — see FormsButtonView's
-        docstring for why this must happen in setup_hook, not per-message.
-        `forms_button_view` is normally already set in `__init__` (so
-        `daily.py` can reuse the same instance); guarded here too so this
-        method stays safe to call standalone.
+        """Construct and register every persistent view exactly once, before
+        the gateway needs to route any interaction to it.
+
+        `FormsButtonView()` MUST be constructed here (inside setup_hook,
+        i.e. after bot.run() has started the event loop) and NOT in
+        `__init__` — discord.ui.View.__init__ calls
+        `asyncio.get_running_loop()` to create its internal "stopped"
+        future, and building the view before the loop exists leaves that
+        future permanently None, which silently breaks all future dispatch
+        to it (see `__init__`'s comment for the full mechanism). This is
+        the one and only construction site; `daily.py` reuses this same
+        instance via `client.forms_button_view` for every message.
 
         `SuperLikeButton` is registered differently: it's a
         `discord.ui.DynamicItem`, so `add_dynamic_items` takes the *class*,
@@ -91,25 +106,9 @@ class PokeSketchDexBot(commands.Bot):
         across every guild, for the rest of the process's life, with no
         per-message re-registration ever needed.
         """
-        if not hasattr(self, "forms_button_view"):
-            self.forms_button_view = FormsButtonView()
+        self.forms_button_view = FormsButtonView()
         self.add_view(self.forms_button_view)
         self.add_dynamic_items(SuperLikeButton)
-        # TEMP DIAGNOSTIC: dump what discord.py's internal view store actually
-        # holds after add_view(), to confirm the button's (component_type,
-        # custom_id) key is really registered under the persistent (None)
-        # message_id bucket the dispatcher falls back to. Guarded because
-        # test doubles for `self` (_FakeBot) have no `_connection`.
-        store = getattr(self, "_connection", None)
-        if store is not None:
-            store = store._view_store
-            log.info(
-                "persistent view registered: view_id=%s is_persistent=%s keys_at_None=%s all_message_id_keys=%s",
-                self.forms_button_view.id,
-                self.forms_button_view.is_persistent(),
-                list(store._views.get(None, {}).keys()),
-                list(store._views.keys()),
-            )
 
     async def _sync_all_joined_guilds(self) -> None:
         """Sync slash commands guild-scoped only, to every guild we're in.
@@ -331,35 +330,6 @@ class PokeSketchDexBot(commands.Bot):
         if not self._commands_synced:
             await self._sync_all_joined_guilds()
             self._commands_synced = True
-
-    async def on_interaction(self, interaction: discord.Interaction) -> None:
-        # TEMP DIAGNOSTIC: fires for every raw interaction (slash command,
-        # button, etc.) regardless of whether discord.py's view dispatcher
-        # finds a matching registered item -- see state.py's
-        # parse_interaction_create, which calls self.dispatch('interaction', ...)
-        # unconditionally after (not instead of) its own ViewStore.dispatch_view
-        # call. Used to confirm whether component-interaction payloads reach
-        # the gateway at all, independent of FormsButtonView's own routing.
-        log.info(
-            "on_interaction: type=%s data=%s message_id=%s",
-            interaction.type, interaction.data, interaction.message.id if interaction.message else None,
-        )
-        store = getattr(self, "_connection", None)
-        if store is not None and interaction.type == discord.InteractionType.component:
-            vs = store._view_store
-            msg_id = interaction.message.id if interaction.message else None
-            data = interaction.data or {}
-            key = (data.get("component_type"), data.get("custom_id"))
-            log.info(
-                "on_interaction diag: msg_id=%s key=%s at_msg_id=%s at_None=%s forms_view_cache_key=%s "
-                "forms_view_is_finished=%s forms_view_is_dispatching=%s",
-                msg_id, key,
-                list(vs._views.get(msg_id, {}).keys()),
-                list(vs._views.get(None, {}).keys()),
-                self.forms_button_view._cache_key,
-                self.forms_button_view.is_finished(),
-                self.forms_button_view.is_dispatching(),
-            )
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Sync commands to a newly-joined guild immediately, and seed its
