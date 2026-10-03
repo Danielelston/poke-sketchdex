@@ -3420,6 +3420,46 @@ async def main() -> None:
         "guilds, a shiny mon with only non-shiny submissions of the same species gets no match"
     )
 
+    # --- latest_matching_submission must also match a WildEncounterSubmission
+    # (a mon caught from a wild encounter has no daily Submission row at all,
+    # so Submission-only lookup silently found nothing forever). Uses its own
+    # user/guild ids so it doesn't disturb sketch_uid's state consumed by the
+    # sync_party_sketch_cache tests below. ---------------------------------
+    sketch_wild_uid = 8002
+    sketch_wild_gid = 910010
+    async with db.session() as s:
+        s.add(db.GuildConfig(guild_id=sketch_wild_gid))
+        wv_sketch = db.WeeklyVote(guild_id=sketch_wild_gid, iso_week="2026-W41")
+        s.add(wv_sketch)
+        await s.flush()
+        we_sketch = db.WildEncounter(
+            guild_id=sketch_wild_gid, weekly_vote_id=wv_sketch.id,
+            local_date=_date.today(), dex_no=1, name="bulbasaur",
+        )
+        s.add(we_sketch)
+        await s.flush()
+        we_sub = db.WildEncounterSubmission(
+            guild_id=sketch_wild_gid, user_id=sketch_wild_uid, wild_encounter_id=we_sketch.id,
+            image_url="https://example.invalid/sketch_wild.png",
+        )
+        s.add(we_sub)
+        await s.commit()
+        we_sub_id = we_sub.id
+
+    async with db.session() as s:
+        wild_match = await pokebox.latest_matching_submission(s, sketch_wild_uid, dex_no=1, is_shiny=False)
+        assert wild_match is not None and wild_match.id == we_sub_id, wild_match
+        assert isinstance(wild_match, db.WildEncounterSubmission), wild_match
+        # Wild encounters have no shiny mechanic -- a shiny query must never match one.
+        no_shiny_wild_match = await pokebox.latest_matching_submission(
+            s, sketch_wild_uid, dex_no=1, is_shiny=True
+        )
+        assert no_shiny_wild_match is None, no_shiny_wild_match
+    print(
+        "latest_matching_submission OK: a WildEncounterSubmission is found too, never matched "
+        "against a shiny query"
+    )
+
     # --- sync_party_sketch_cache: cache-hit (zero fetches) vs cache-miss
     # (fetch + save + delete prior stale file). --------------------------
     sketch_cache_dir = os.path.join(tmp, "party_sketch_cache")
@@ -3607,6 +3647,69 @@ async def main() -> None:
             )
         finally:
             pokebox._cache_image = _real_cache_image
+    finally:
+        pokebox._cache_image = _real_cache_image
+
+    # --- sync_party_sketch_cache end-to-end for a WILD-ENCOUNTER-sourced mon:
+    # cache-miss fetches+saves via the WildEncounterSubmission path, and a
+    # stale stored image_url is re-resolved via WildEncounter.thread_id
+    # (not DailyPokemon.thread_id) before falling back to the stored URL —
+    # this is the exact path that silently never worked before the fix. ----
+    we_refetch_thread_id = 920002
+    we_refetch_uid = 8101
+    we_fresh_url = "https://cdn.discordapp.com/attachments/3/4/we_fresh.png?ex=live"
+    we_stale_url = "https://cdn.discordapp.com/attachments/3/4/we_stale.png?ex=expired"
+
+    async def _cache_image_rejects_we_stale(url, user_id, caughtmon_id, cache_dir, filename=None):
+        if url == we_stale_url:
+            raise RuntimeError("simulated 404: stale Discord CDN URL expired")
+        return await _real_cache_image(url, user_id, caughtmon_id, cache_dir, filename=filename)
+
+    async with db.session() as s:
+        we_refetch_wallet = await pokebox.get_or_create_wallet(s, we_refetch_uid)
+        we_refetch_wallet.balance = 5
+        await s.commit()
+        s.add(db.GuildConfig(guild_id=910011))
+        we_refetch_wv = db.WeeklyVote(guild_id=910011, iso_week="2026-W42")
+        s.add(we_refetch_wv)
+        await s.flush()
+        we_refetch_encounter = db.WildEncounter(
+            guild_id=910011, weekly_vote_id=we_refetch_wv.id, local_date=_date.today(),
+            dex_no=1, name="bulbasaur", thread_id=we_refetch_thread_id,
+        )
+        s.add(we_refetch_encounter)
+        await s.flush()
+        we_refetch_sub = db.WildEncounterSubmission(
+            guild_id=910011, user_id=we_refetch_uid, wild_encounter_id=we_refetch_encounter.id,
+            message_id=555002, image_url=we_stale_url,
+        )
+        s.add(we_refetch_sub)
+        await s.commit()
+        we_refetch_sub_id = we_refetch_sub.id
+
+    # /catch with the REAL _cache_image first, same as the daily-Submission
+    # case above -- only sync_party_sketch_cache's later read needs to cope
+    # with the by-then-stale URL.
+    async with db.session() as s:
+        we_refetch_mon = await pokebox.catch_submission(
+            s, we_refetch_uid, party_dir, target=f"w{we_refetch_sub_id}"
+        )
+        await s.commit()
+        we_refetch_mon_id = we_refetch_mon.id
+
+    pokebox._cache_image = _cache_image_rejects_we_stale
+    try:
+        we_fake_bot = _FakeBotForRefetch({we_refetch_thread_id: _FakeThreadForRefetch(we_fresh_url)})
+        async with db.session() as s:
+            mon_row = await s.get(db.CaughtMon, we_refetch_mon_id)
+            we_refetch_path = await pokebox.sync_party_sketch_cache(we_fake_bot, s, mon_row, sketch_cache_dir)
+        assert we_refetch_path is not None and os.path.exists(we_refetch_path), we_refetch_path
+        assert we_refetch_path.endswith(f"{we_refetch_mon_id}_{we_refetch_sub_id}.png"), we_refetch_path
+        print(
+            "sync_party_sketch_cache OK: a wild-encounter-caught mon resolves its own-sketch "
+            "thumbnail via WildEncounterSubmission (not just Submission), including fresh-URL "
+            "re-resolution via WildEncounter.thread_id when the stored URL is stale"
+        )
     finally:
         pokebox._cache_image = _real_cache_image
 
