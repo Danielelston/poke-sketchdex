@@ -32,6 +32,7 @@ from .db import (
     PokeBox,
     Submission,
     SuperLikeWallet,
+    WildEncounter,
     WildEncounterSubmission,
 )
 from .formatting import species_display_name
@@ -724,17 +725,26 @@ async def mon_for_submission(s, submission_id: int, *, wild: bool) -> CaughtMon 
 # data/party_sketch_cache/{user_id}/{caughtmon_id}_{submission_id}.png
 
 
-async def latest_matching_submission(s, user_id: int, dex_no: int, is_shiny: bool) -> Submission | None:
-    """The user's most recent Submission (any guild) whose DailyPokemon
-    dex_no AND is_shiny both match the given caught mon's species/shininess,
-    or None if no such submission exists.
+async def latest_matching_submission(
+    s, user_id: int, dex_no: int, is_shiny: bool
+) -> CatchableSubmission | None:
+    """The user's most recent catchable-type submission (daily Submission OR
+    WildEncounterSubmission, any guild) whose species/shininess match the
+    given caught mon, or None if no such submission exists.
 
     A shiny-caught mon only ever matches a shiny-tagged submission of the
     same species — never a non-shiny sketch of the same species, even a more
-    recent one. No existing helper joins Submission -> DailyPokemon this way
-    (Submission has no direct CaughtMon link), so this is new.
+    recent one. Wild encounters have no shiny mechanic (see
+    WildEncounterSubmission.is_shiny, always False), so a shiny mon can only
+    ever match a daily Submission.
+
+    Checks both sources (like catchable_submissions() already does for
+    /catch) rather than just Submission -- a mon caught from a wild
+    encounter has no corresponding daily Submission row at all, so looking
+    at Submission alone silently found nothing and fell back to the sprite
+    forever for every wild-caught mon.
     """
-    return (
+    daily_match = (
         await s.execute(
             select(Submission)
             .join(DailyPokemon, DailyPokemon.id == Submission.daily_id)
@@ -747,6 +757,26 @@ async def latest_matching_submission(s, user_id: int, dex_no: int, is_shiny: boo
             .limit(1)
         )
     ).scalar_one_or_none()
+
+    wild_match: WildEncounterSubmission | None = None
+    if not is_shiny:
+        wild_match = (
+            await s.execute(
+                select(WildEncounterSubmission)
+                .join(WildEncounter, WildEncounter.id == WildEncounterSubmission.wild_encounter_id)
+                .where(
+                    WildEncounterSubmission.user_id == user_id,
+                    WildEncounter.dex_no == dex_no,
+                )
+                .order_by(desc(WildEncounterSubmission.created_at))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    candidates = [c for c in (daily_match, wild_match) if c is not None]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda c: c.created_at)
 
 
 def _delete_stale_sketch_cache_files(user_dir: str, caughtmon_id: int, keep_filename: str) -> None:
@@ -763,7 +793,7 @@ def _delete_stale_sketch_cache_files(user_dir: str, caughtmon_id: int, keep_file
             delete_cached_file(os.path.join(user_dir, name))
 
 
-async def _resolve_fresh_submission_image_url(bot, s, sub: Submission) -> str | None:
+async def _resolve_fresh_submission_image_url(bot, s, sub: CatchableSubmission) -> str | None:
     """Re-resolve a live, non-expired attachment URL for `sub` via Discord's
     message API, rather than trusting `sub.image_url` — Discord CDN
     attachment URLs are signed with a short-lived `ex=` expiry and a URL
@@ -775,15 +805,26 @@ async def _resolve_fresh_submission_image_url(bot, s, sub: Submission) -> str | 
     arbitrarily old, so it must re-fetch the Discord message and read its
     CURRENT attachment URL instead of the stale stored copy.
 
+    `sub` can be either a daily Submission or a WildEncounterSubmission (see
+    latest_matching_submission) — each anchors its thread differently
+    (DailyPokemon.thread_id vs WildEncounter.thread_id), so branch on type.
+
     Returns None on any failure (channel/thread gone, message deleted,
     missing permissions, no attachments) so the caller can fall back to the
     stored `sub.image_url` as a last-ditch attempt.
     """
     if sub.message_id is None:
         return None
-    thread_id = (
-        await s.execute(select(DailyPokemon.thread_id).where(DailyPokemon.id == sub.daily_id))
-    ).scalar_one_or_none()
+    if isinstance(sub, WildEncounterSubmission):
+        thread_id = (
+            await s.execute(
+                select(WildEncounter.thread_id).where(WildEncounter.id == sub.wild_encounter_id)
+            )
+        ).scalar_one_or_none()
+    else:
+        thread_id = (
+            await s.execute(select(DailyPokemon.thread_id).where(DailyPokemon.id == sub.daily_id))
+        ).scalar_one_or_none()
     if thread_id is None:
         return None
     try:
