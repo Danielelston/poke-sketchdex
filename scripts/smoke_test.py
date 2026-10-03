@@ -3706,8 +3706,8 @@ async def main() -> None:
     assert _direct_letterbox(card, letterbox_box, corrupt_sketch_path) is False
     print("letterbox OK: corrupt sketch file returns False (fallback signal), never raises")
 
-    # --- Toggle button visibility: self-view above/below Lv5, and never on
-    # someone else's profile regardless of viewer level/toggle state. ----
+    # --- Toggle button visibility: self-view above/below the gate level, and
+    # never on someone else's profile regardless of viewer level/toggle state. ----
     from pokesketch.cogs.profile import SKETCH_ART_MIN_LEVEL, Profile, _sketch_art_unlocked
 
     assert _sketch_art_unlocked(SKETCH_ART_MIN_LEVEL) is True
@@ -3718,8 +3718,8 @@ async def main() -> None:
     # the derived level actually lands where each case needs it.
     toggle_low_uid, toggle_high_uid, toggle_viewer_uid = 8101, 8102, 8103
     async with db.session() as s:
-        s.add(db.GlobalUser(user_id=toggle_low_uid, exp=0))  # below Lv5
-        s.add(db.GlobalUser(user_id=toggle_high_uid, exp=leveling.exp_to_reach(SKETCH_ART_MIN_LEVEL)))  # exactly Lv5
+        s.add(db.GlobalUser(user_id=toggle_low_uid, exp=0))  # below the gate level
+        s.add(db.GlobalUser(user_id=toggle_high_uid, exp=leveling.exp_to_reach(SKETCH_ART_MIN_LEVEL)))  # exactly at the gate level
         s.add(db.GlobalUser(user_id=toggle_viewer_uid, exp=leveling.exp_to_reach(99)))  # high level, other's profile
         for i, uid in enumerate((toggle_low_uid, toggle_high_uid, toggle_viewer_uid)):
             toggle_gid = 910010 + i
@@ -3739,7 +3739,7 @@ async def main() -> None:
         bot=_FakeProfileBot(badge_cache_dir, accent_color=None, api=fake_api_client, image_cache_dir=toggle_avatar_dir)
     )
 
-    # Self-view, below Lv5 -> no toggle button at all.
+    # Self-view, below the gate level -> no toggle button at all.
     low_user = _FakeProfileUser(toggle_low_uid, display_name="LowLevel")
     low_payload = await toggle_cog._build_profile_payload(toggle_low_uid, low_user, guild_id=1)
     assert low_payload is not None
@@ -3749,7 +3749,7 @@ async def main() -> None:
     ]
     assert len(low_view.children) == 2, [c.label for c in low_view.children]
 
-    # Self-view, Lv5+ -> toggle button present, defaults to Off.
+    # Self-view, at/above the gate level -> toggle button present, defaults to Off.
     high_user = _FakeProfileUser(toggle_high_uid, display_name="HighLevel")
     high_payload = await toggle_cog._build_profile_payload(toggle_high_uid, high_user, guild_id=1)
     assert high_payload is not None
@@ -3759,15 +3759,16 @@ async def main() -> None:
     ]
     assert len(high_view.children) == 3, [c.label for c in high_view.children]
 
-    # Other-view: a high-level viewer looking at someone ELSE's Lv5+ profile
+    # Other-view: a high-level viewer looking at someone ELSE's gated profile
     # never sees the toggle, regardless of the viewer's own level/toggle state.
     other_view_payload = await toggle_cog._build_profile_payload(toggle_viewer_uid, high_user, guild_id=1)
     assert other_view_payload is not None
     _o_embed, other_view, _o_files = other_view_payload
     assert len(other_view.children) == 2, [c.label for c in other_view.children]
     print(
-        "toggle button visibility OK: omitted below Lv5, present (default Off) at Lv5+ on a "
-        "self-view, never shown when viewing someone else's profile regardless of viewer level"
+        "toggle button visibility OK: omitted below the gate level, present (default Off) at/above "
+        "the gate level on a self-view, never shown when viewing someone else's profile regardless "
+        "of viewer level"
     )
 
     # --- Whose toggle governs rendering: always the TARGET's, never the

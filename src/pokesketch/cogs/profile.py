@@ -88,9 +88,9 @@ log = logging.getLogger(__name__)
 KUDOS_VIEW_TIMEOUT = 600.0  # 10 minutes — see module docstring's "View persistence" note.
 MAX_PARTY_LINES = 6
 
-# Own-Sketch Party Thumbnails: Lv5 ("Great Ball" tier) gate for the toggle
-# button — see the design doc's locked decisions.
-SKETCH_ART_MIN_LEVEL = 5
+# Own-Sketch Party Thumbnails: Lv2 gate for the toggle button (temporarily
+# lowered from Lv5 "Great Ball" tier) — see the design doc's locked decisions.
+SKETCH_ART_MIN_LEVEL = 2
 
 
 def _sketch_art_unlocked(level: int) -> bool:
