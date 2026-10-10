@@ -15,6 +15,7 @@ ends it if Discord hasn't already closed it, and reads the results directly.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 from datetime import timedelta
@@ -275,11 +276,41 @@ async def _close_and_get_winner(channel: discord.abc.Messageable, message_id: in
     return winner.text
 
 
-async def _fetch_channel(client: discord.Client, channel_id: int) -> discord.abc.GuildChannel:
+async def _fetch_channel(client: discord.Client, channel_id: int) -> discord.abc.Messageable:
     channel = client.get_channel(channel_id)
     if channel is None:
         channel = await client.fetch_channel(channel_id)
     return channel
+
+
+async def wait_for_poll_result(
+    channel: discord.abc.Messageable,
+    poll_message_id: int,
+    *,
+    timeout: float = 60.0,
+    interval: float = 5.0,
+    history_limit: int = 20,
+) -> discord.Message | None:
+    """Wait up to `timeout` seconds for Discord's poll-result message for `poll_message_id`.
+
+    Scans the most recent `history_limit` messages in `channel` every `interval` seconds,
+    looking for a message whose type is `discord.MessageType.poll_result` and whose
+    reference points back to `poll_message_id`. Returns the matching message, or `None`
+    if the timeout expires.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        async for msg in channel.history(limit=history_limit):
+            if (
+                msg.type is discord.MessageType.poll_result
+                and msg.reference is not None
+                and msg.reference.message_id == poll_message_id
+            ):
+                return msg
+        now = asyncio.get_event_loop().time()
+        if now >= deadline:
+            return None
+        await asyncio.sleep(min(interval, deadline - now + 0.001))
 
 
 async def post_category_poll(client: discord.Client, guild_id: int) -> bool:
@@ -400,6 +431,15 @@ async def resolve_category_poll(client: discord.Client, api: PokeApiClient, guil
             return True
         # Edge case: a single valid choice isn't a meaningful poll — skip straight to resolution.
         return await _finalize_weekly_vote(client, api, guild_id, weekly_vote_id, category, candidates[0][1])
+
+    result_msg = await wait_for_poll_result(channel, message_id)
+    if result_msg is None:
+        log.warning(
+            "Guild %s: poll-result message for category poll %s did not appear within 60s; posting choice poll anyway.",
+            guild_id, message_id,
+        )
+    else:
+        log.info("Guild %s: observed poll-result message for category poll %s.", guild_id, message_id)
 
     poll = discord.Poll(
         question=f"Day 2: pick this week's {CATEGORY_LABELS[category]}!"[:300], duration=VOTE_POLL_DURATION
