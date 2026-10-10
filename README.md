@@ -4,7 +4,7 @@ A self-hosted Discord bot that posts a **daily Pokémon sketch challenge** — p
 
 Multi-guild by design; runs comfortably on a tiny LXC on Proxmox.
 
-Full design docs live in the author's Obsidian vault (`Areas/Homelab/Projects/poke-sketchdex/`).
+Full design docs live in the author's Obsidian vault (`Areas/Projects/poke-sketchdex/`).
 
 ## Features
 
