@@ -164,7 +164,6 @@ class Admin(commands.Cog):
             cfg.role_id = role.id
             cfg.post_time = time
             cfg.timezone = timezone
-            vote_day1_weekday = cfg.vote_day1_weekday
             await s.commit()
             if await s.get(db.GuildStats, gid) is None:
                 s.add(db.GuildStats(guild_id=gid))
@@ -176,7 +175,6 @@ class Admin(commands.Cog):
             await seed_default_events(s, self.bot.api, gid)
             await s.commit()
         self.bot.reschedule_guild(gid, time, timezone)
-        self.bot.reschedule_guild_votes(gid, vote_day1_weekday, time, timezone)
         await interaction.response.send_message(
             f"✅ Daily posts set in {channel.mention}, pinging {role.mention} at "
             f"**{time} {timezone}**.",
@@ -383,9 +381,7 @@ class Admin(commands.Cog):
                 await interaction.response.send_message("Run `/setup` first.", ephemeral=True)
                 return
             cfg.vote_day1_weekday = weekday.value
-            post_time, tz = cfg.post_time, cfg.timezone
             await s.commit()
-        self.bot.reschedule_guild_votes(gid, weekday.value, post_time, tz)
         await interaction.response.send_message(
             f"✅ Weekly category vote now posts **{weekday.name}** (specific-choice vote the day after, "
             "resolution the day after that).",
