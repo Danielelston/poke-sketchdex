@@ -51,6 +51,11 @@ MAX_POLL_OPTIONS = 10
 # Discord's actual per-answer text cap.
 _POLL_ANSWER_MAX_LEN = 55
 
+# Discord auto-closes polls after their duration. We use 48h so the bot's
+# explicit force-end (scheduled job) is always what ends a vote; 24h could
+# expire before the next daily job across a DST boundary or misfire grace.
+VOTE_POLL_DURATION = timedelta(hours=48)
+
 TYPE_NAMES = [
     "normal", "fire", "water", "electric", "grass", "ice", "fighting", "poison", "ground",
     "flying", "psychic", "bug", "rock", "ghost", "dragon", "dark", "steel", "fairy",
@@ -299,7 +304,7 @@ async def post_category_poll(client: discord.Client, guild_id: int) -> bool:
         return False
 
     channel = await _fetch_channel(client, channel_id)
-    poll = discord.Poll(question="This week's wild encounter category?", duration=timedelta(hours=24))
+    poll = discord.Poll(question="This week's wild encounter category?", duration=VOTE_POLL_DURATION)
     for cat in ballot:
         poll.add_answer(text=CATEGORY_LABELS[cat])
     msg = await channel.send(content="🗳️ Vote for this week's wild encounter theme!", poll=poll)
@@ -397,7 +402,7 @@ async def resolve_category_poll(client: discord.Client, api: PokeApiClient, guil
         return await _finalize_weekly_vote(client, api, guild_id, weekly_vote_id, category, candidates[0][1])
 
     poll = discord.Poll(
-        question=f"Day 2: pick this week's {CATEGORY_LABELS[category]}!"[:300], duration=timedelta(hours=24)
+        question=f"Day 2: pick this week's {CATEGORY_LABELS[category]}!"[:300], duration=VOTE_POLL_DURATION
     )
     for display_text, _choice_key in candidates:
         poll.add_answer(text=display_text[:_POLL_ANSWER_MAX_LEN])
