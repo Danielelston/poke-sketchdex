@@ -241,6 +241,61 @@ async def main() -> None:
     assert total == pokebox.TOTAL_DEX
     print(f"pokebox OK: scanned={scanned}/{total} (double-insert stayed idempotent)")
 
+    # /pokebox embed: build the embed directly and assert the 🚧 marker + copy.
+    from pokesketch.cogs.collection import Collection
+    from pokesketch.discord_limits import (
+        DISCORD_EMBED_DESCRIPTION_LIMIT,
+        DISCORD_EMBED_FIELD_LIMIT,
+        DISCORD_EMBED_FIELD_NAME_LIMIT,
+        DISCORD_EMBED_FOOTER_LIMIT,
+        DISCORD_EMBED_MAX_FIELDS,
+        DISCORD_EMBED_TITLE_LIMIT,
+        DISCORD_EMBED_TOTAL_LIMIT,
+    )
+
+    class _FakePokeboxUser:
+        def __init__(self, uid: int, display_name: str):
+            self.id = uid
+            self.display_name = display_name
+
+    class _FakePokeboxResponse:
+        def __init__(self):
+            self.sent: dict | None = None
+
+        async def send_message(self, content=None, **kwargs):
+            self.sent = {"content": content, **kwargs}
+
+    class _FakePokeboxInteraction:
+        def __init__(self, uid: int, display_name: str):
+            self.user = _FakePokeboxUser(uid, display_name)
+            self.response = _FakePokeboxResponse()
+
+    pokebox_interaction = _FakePokeboxInteraction(pb_uid, "PokeboxTester")
+    pokebox_cog = Collection(bot=None)  # type: ignore[arg-type]
+    await pokebox_cog.pokebox_cmd.callback(pokebox_cog, pokebox_interaction)  # type: ignore[arg-type]
+    assert pokebox_interaction.response.sent is not None
+    pokebox_embed = pokebox_interaction.response.sent["embed"]
+    assert pokebox_embed.title.startswith("🚧"), pokebox_embed.title
+    assert "Showing per-generation counts only. Which species you've scanned is coming soon." in (
+        pokebox_embed.description or ""
+    ), pokebox_embed.description
+    assert len(pokebox_embed.fields) == 1
+    assert pokebox_embed.fields[0].name == "By generation"
+    assert len(pokebox_embed.title) <= DISCORD_EMBED_TITLE_LIMIT, len(pokebox_embed.title)
+    assert len(pokebox_embed.description or "") <= DISCORD_EMBED_DESCRIPTION_LIMIT, len(
+        pokebox_embed.description or ""
+    )
+    assert len(pokebox_embed.fields) <= DISCORD_EMBED_MAX_FIELDS, len(pokebox_embed.fields)
+    footer_text = pokebox_embed.footer.text if pokebox_embed.footer else ""
+    assert len(footer_text) <= DISCORD_EMBED_FOOTER_LIMIT, len(footer_text)
+    embed_total = len(pokebox_embed.title or "") + len(pokebox_embed.description or "") + len(footer_text)
+    for field in pokebox_embed.fields:
+        assert len(field.name) <= DISCORD_EMBED_FIELD_NAME_LIMIT, (field.name, len(field.name))
+        assert len(field.value) <= DISCORD_EMBED_FIELD_LIMIT, (field.name, len(field.value))
+        embed_total += len(field.name) + len(field.value)
+    assert embed_total <= DISCORD_EMBED_TOTAL_LIMIT, embed_total
+    print("pokebox embed OK: 🚧 marker and per-generation copy present, within Discord limits")
+
     # /catch offline: stub the network image download so the smoke test stays offline.
     party_dir = os.path.join(tmp, "party_cache")
 
