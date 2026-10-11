@@ -1083,6 +1083,26 @@ async def main() -> None:
         "(all within Discord's embed limits)"
     )
 
+    # Tutorial DM embed: build the real embed, assert copy, field-count, and
+    # every Discord limit. This is the offline gate for the /register tutorial.
+    from pokesketch.embeds import tutorial_embed
+
+    tutorial = tutorial_embed()
+    assert tutorial.title == "🎨 Welcome to PokeSketchDex!", tutorial.title
+    assert tutorial.description == "You're registered! Here's how it all works.", tutorial.description
+    assert tutorial.color.value == 0x5865F2, hex(tutorial.color.value)
+    tutorial_field_names = [f.name for f in tutorial.fields]
+    assert "📕 Your PokéBox 🚧" in tutorial_field_names
+    assert "Coming soon" in tutorial_field_names
+    # Only the PokéBox field title should carry the 🚧 marker.
+    assert sum(f.name.count("🚧") for f in tutorial.fields) == 1
+    tutorial_total = _assert_embed_within_discord_limits(tutorial)
+    print(
+        f"tutorial embed OK: {len(tutorial.fields)} fields, "
+        f"{[len(f.value) for f in tutorial.fields]} chars each, {tutorial_total} total "
+        "(all within Discord's embed limits)"
+    )
+
     # --- Event admin system: /event-list pagination, /event-view truncation,
     # /event-create cap enforcement, /event-edit partial updates, /event-enable.
     # Every check below drives the real cog command callback end-to-end (not a
