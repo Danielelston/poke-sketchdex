@@ -133,7 +133,7 @@ class GlobalUser(Base):
     longest_global_streak: Mapped[int] = mapped_column(Integer, default=0)
     last_submit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    # Own-Sketch Party Thumbnails opt-in (Lv5+ gated at the command layer, not
+    # Own-Sketch Party Thumbnails opt-in (Lv2+ gated at the command layer, not
     # here) — global, not per-guild, since the active party itself is global.
     # NEW COLUMN on an EXISTING live table: db.create_all() only creates
     # missing tables, not columns on a table that already has rows, so this

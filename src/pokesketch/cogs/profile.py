@@ -88,13 +88,14 @@ log = logging.getLogger(__name__)
 KUDOS_VIEW_TIMEOUT = 600.0  # 10 minutes — see module docstring's "View persistence" note.
 MAX_PARTY_LINES = 6
 
-# Own-Sketch Party Thumbnails: Lv2 gate for the toggle button (temporarily
-# lowered from Lv5 "Great Ball" tier) — see the design doc's locked decisions.
+# Own-Sketch Party Thumbnails: Lv2 gate for the toggle button (historically
+# Lv5 "Great Ball" tier at design time; lowered to Lv2 by PR #20) — see the
+# design doc's locked decisions.
 SKETCH_ART_MIN_LEVEL = 2
 
 
 def _sketch_art_unlocked(level: int) -> bool:
-    """Standalone boolean check for the sketch-party-art toggle's Lv5+ gate —
+    """Standalone boolean check for the sketch-party-art toggle's Lv2+ gate —
     kept as its own function (not inlined at call sites) so a future premium
     tier can layer on as e.g. `premium or _sketch_art_unlocked(level)` without
     a rearchitecture. No premium/paid infrastructure exists or is built here;
@@ -287,7 +288,7 @@ class ProfileView(discord.ui.View):
         self.message: discord.Message | None = None
         # Sketch Party Art toggle: only shown on the target's OWN self-view of
         # their /profile (never on someone else's card, regardless of the
-        # viewer's own level/toggle state) AND only at Lv5+ — omitted
+        # viewer's own level/toggle state) AND only at Lv2+ — omitted
         # entirely below the gate, not shown-and-disabled.
         if show_sketch_toggle:
             self.toggle_sketch_art.label = f"Sketch Party Art: {'On' if sketch_enabled else 'Off'}"
