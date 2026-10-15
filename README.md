@@ -26,18 +26,24 @@ Run `/help` in Discord for the always-current, in-app reference (player commands
 ### Player
 | Command | What |
 |---|---|
+| `/register` | Join the server's challenge: grants the `@Sketchers` role and sends a tutorial DM walking through how everything works |
 | `/submit` | Submit your sketch (today's thread or an older/wild-encounter thread) |
 | `/profile [user]` | Level, EXP, and streaks — per-server and global |
 | `/leaderboard` | Top sketchers in this server by EXP |
 | `/streak` · `/stats` | Server-wide streak and totals |
 | `/pokebox [user]` | Dex completion tracker (free, automatic) |
-| `/catch [target] [nickname]` | Spend a pokeball to catch an eligible sketch into your party/storage |
+| `/catch [target] [nickname]` | Spend a pokeball to catch an eligible sketch of **your own** into your party/storage |
 | `/party [user]` | Your 6 active party slots |
 | `/box [user]` | Paginated view of your storage box |
 | `/swap <box_slot> <active_slot>` | Swap a boxed mon into your active party |
 | `/release <slot> [active]` | Release a caught mon and free its slot |
 | `/pokeballs [user]` | Pokeball balance and next weekly grant |
 | `/help` | In-app help and EXP reference |
+
+**Image guidance for `/submit`:** landscape fills party thumbnails best — roughly 3:2 or 16:10, with
+**1080px on the long edge** as the sweet spot (bigger is fine but gets scaled down). Discord caps
+attachments somewhere in the **10–20 MB range** depending on your account tier and the server's boost
+level.
 
 ### Admin (Manage Server)
 | Command | What |
@@ -71,12 +77,28 @@ For instant slash-command registration during development, set `POKESKETCH_DEV_G
 
 1. Create an application + bot at <https://discord.com/developers/applications>.
 2. Under **Bot**, enable the **Server Members Intent** (used for role/member lookups). Message Content intent is **not** required — submissions use `/submit`.
-3. Under **OAuth2 → URL Generator**, select scopes `bot` and `applications.commands`, and bot permissions: *Send Messages, Embed Links, Attach Files, Create Public Threads, Send Messages in Threads, Add Reactions, Manage Messages* (and *Manage Roles* only if you later add level→role rewards).
+3. Under **OAuth2 → URL Generator**, select scopes `bot` and `applications.commands`, and bot permissions: *Send Messages, Embed Links, Attach Files, Create Public Threads, Send Messages in Threads, Add Reactions, Manage Messages, Manage Roles* — **all required**. `Manage Roles` is needed for `/register`'s role grant: **existing installs invited before this requirement was added must be re-invited with an updated OAuth2 URL**, or `/register` fails with `Forbidden` for every user in that guild. Note also that **role hierarchy is not a permission** — the bot's own highest role must sit **above** the target `@Sketchers` role in the server's role list, a per-server manual step that can't be fixed in code.
 4. Invite the bot, then run `/setup` in your server.
 
 ## Self-hosting on Proxmox
 
 Designed to run as a lightweight, outbound-only `systemd` service in an unprivileged Debian 12 LXC. See [`deploy/`](deploy/) for the systemd unit, a provisioning script, and the nightly DB backup + daily health-check timers. The SQLite database in `data/` is the entire bot state — back it up before every deploy (`cp data/pokesketch.db data/pokesketch.db.pre-deploy-bak`) and include the LXC in your vzdump job. Cached reference art (`data/images_cache/`) and caught-sketch images (`data/party_cache/`) live alongside it.
+
+### Deploying the player-registration feature
+
+This feature adds one column to an existing live table. `db.create_all()` only creates missing
+*tables*, never new columns on a table that already has rows, so this one migration step is manual:
+
+1. **Back up the DB first:** `cp data/pokesketch.db data/pokesketch.db.pre-deploy-bak`
+2. Run exactly one statement against it: `ALTER TABLE users ADD COLUMN registered_at DATETIME`
+3. **Re-invite the bot** with an updated OAuth2 URL that includes `Manage Roles` (see
+   [Discord application setup](#discord-application-setup) above) — a plain `systemctl restart` is
+   **not** sufficient; existing installs lack this permission and `/register` will fail with
+   `Forbidden` until re-invited.
+
+Rollback: the column is nullable and unread by anything else in v1, so reverting the code leaves it
+harmlessly in place — existing rows simply read `NULL` ("registered before tracking existed, or never
+via `/register`").
 
 ## Configuration
 
