@@ -69,8 +69,11 @@ class Collection(commands.Cog):
 
         pct = (scanned / total * 100) if total else 0.0
         embed = discord.Embed(
-            title=f"📖 {target.display_name}'s PokeBox",
-            description=f"**{scanned} / {total} scanned ({pct:.1f}%)**",
+            title=f"🚧 📖 {target.display_name}'s PokeBox",
+            description=(
+                f"**{scanned} / {total} scanned ({pct:.1f}%)**\n\n"
+                "*Showing per-generation counts only. Which species you've scanned is coming soon.*"
+            ),
             color=0x2ECC71,
         )
         gen_lines = [f"{label}: {gc}/{gt}" for label, gc, gt in by_gen]

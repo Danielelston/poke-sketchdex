@@ -11,6 +11,25 @@ from ..discord_limits import DISCORD_EMBED_FIELD_LIMIT  # noqa: F401 — re-expo
 from ..discord_limits import guarded_add_field as _add_guarded_field
 
 
+def _getting_started_field_value() -> str:
+    """New-player onboarding field pointing to /register."""
+    return (
+        "Run `/register` to join the daily sketch challenge, get the sketcher role, and receive "
+        "this tutorial DM with the full walkthrough."
+    )
+
+
+def _sketch_sizes_field_value() -> str:
+    """Image-shape guidance mirrored from the tutorial DM."""
+    return (
+        "Any image works, but **landscape fills the frame best** — roughly 3:2 or 16:10. "
+        "Tall/portrait sketches get letterboxed with bars either side in party thumbnails. "
+        "**1080px on the long edge** is the sweet spot; bigger is fine but gets scaled down for "
+        "thumbnails. Discord caps attachments at 10–20 MB depending on your tier and the "
+        "server's boost level."
+    )
+
+
 def _exp_field_value() -> str:
     """Build the EXP-earning explainer from the live leveling constants.
 
@@ -129,8 +148,10 @@ class Help(commands.Cog):
             ),
             color=0x5865F2,
         )
+        _add_guarded_field(embed, "🚀 Getting started", _getting_started_field_value())
         _add_guarded_field(embed, "⭐ How EXP works", _exp_field_value())
         _add_guarded_field(embed, "🐾 Party mon leveling", _mon_exp_field_value())
+        _add_guarded_field(embed, "📐 Sketch sizes", _sketch_sizes_field_value())
         _add_guarded_field(
             embed,
             "🧑‍🎨 Sketching & progress",
@@ -160,9 +181,9 @@ class Help(commands.Cog):
         _add_guarded_field(
             embed,
             "📦 Catch & collection",
-            "`/catch [target] [nickname]` — spend a pokeball to catch an eligible sketch into "
-            "your party/storage; pick from the autocomplete list or leave blank for your most "
-            "recent one\n"
+            "`/catch [target] [nickname]` — spend a pokeball to catch one of your own eligible "
+            "sketches into your party/storage; pick from the autocomplete list or leave blank for your "
+            "most recent one\n"
             "-# Caught images are stored downsized (max 1080x1080px) to keep storage bounded\n"
             "`/party [user] [public]` — your 6 active party slots (ephemeral to you by "
             "default; `public` posts it to the channel instead, auto-deleting in 10 min)\n"

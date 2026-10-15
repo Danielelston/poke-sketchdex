@@ -30,6 +30,7 @@ INITIAL_EXTENSIONS = [
     "pokesketch.cogs.profile",
     "pokesketch.cogs.gym",
     "pokesketch.cogs.help",
+    "pokesketch.cogs.registration",
 ]
 
 WEEKLY_POKEBALL_JOB_ID = "weekly-pokeball-grant"

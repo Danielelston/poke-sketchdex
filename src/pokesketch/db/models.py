@@ -110,6 +110,15 @@ class User(Base):
     longest_streak: Mapped[int] = mapped_column(Integer, default=0)
     last_submit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # When this guild user first ran /register (DM succeeded + role granted).
+    # NEW COLUMN on an EXISTING live table: db.create_all() only creates missing
+    # tables, not columns on a table that already has rows, so this requires a
+    # manual, documented deploy step (back up the DB first):
+    #   ALTER TABLE users ADD COLUMN registered_at DATETIME
+    # Same posture as global_users.sketch_party_art_enabled and
+    # CaughtMon.mon_exp/exp_today. Rollback: nullable and unread in v1, so
+    # reverting the code leaves it harmlessly in place.
+    registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class GlobalUser(Base):
@@ -124,7 +133,7 @@ class GlobalUser(Base):
     longest_global_streak: Mapped[int] = mapped_column(Integer, default=0)
     last_submit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    # Own-Sketch Party Thumbnails opt-in (Lv5+ gated at the command layer, not
+    # Own-Sketch Party Thumbnails opt-in (Lv2+ gated at the command layer, not
     # here) — global, not per-guild, since the active party itself is global.
     # NEW COLUMN on an EXISTING live table: db.create_all() only creates
     # missing tables, not columns on a table that already has rows, so this
