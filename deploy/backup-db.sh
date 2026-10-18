@@ -1,9 +1,8 @@
 #!/bin/bash
-# Nightly SQLite backup for PokeSketchDex — sqlite-safe copy + rsync to backup host.
+# Nightly SQLite backup for PokeSketchDex — local snapshot and optional remote copy.
 set -euo pipefail
 DB=/opt/pokesketch/data/pokesketch.db
 DEST_LOCAL=/opt/pokesketch/data/backups
-DEST_REMOTE=backup-user@backup-host.example:/path/to/backups/
 STAMP=$(date +%Y%m%d-%H%M%S)
 
 mkdir -p "$DEST_LOCAL"
@@ -14,8 +13,21 @@ sqlite3 "$DB" ".backup '$DEST_LOCAL/pokesketch-$STAMP.db'"
 # Keep the last 14 local snapshots.
 ls -1t "$DEST_LOCAL"/pokesketch-*.db 2>/dev/null | tail -n +15 | xargs -r rm -f
 
-# Push tonight's snapshot to backup host (offsite from the LXC).
-ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i /path/to/backup-ssh-key backup-user@backup-host.example 'mkdir -p /path/to/backups' 2>/dev/null || true
-rsync -a -e 'ssh -i /path/to/backup-ssh-key -o StrictHostKeyChecking=accept-new' "$DEST_LOCAL/pokesketch-$STAMP.db" "$DEST_REMOTE"
+# Configure BACKUP_REMOTE_DEST in /etc/pokesketch-backup.env for an off-host copy.
+# The destination directory must already exist on the remote host.
+if [ -n "${BACKUP_REMOTE_DEST:-}" ]; then
+    if [ -n "${BACKUP_SSH_KEY:-}" ]; then
+        case "$BACKUP_SSH_KEY" in
+            *[!a-zA-Z0-9_./-]*) echo "BACKUP_SSH_KEY may contain only letters, digits, _, ., / and -" >&2; exit 1 ;;
+        esac
+        rsync -a -e "ssh -i $BACKUP_SSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=yes" \
+            "$DEST_LOCAL/pokesketch-$STAMP.db" "$BACKUP_REMOTE_DEST"
+    else
+        rsync -a -e 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' \
+            "$DEST_LOCAL/pokesketch-$STAMP.db" "$BACKUP_REMOTE_DEST"
+    fi
+else
+    echo "[$(date -Is)] WARNING: BACKUP_REMOTE_DEST unset; backup is local only" >&2
+fi
 
 echo "[$(date -Is)] Backup complete: pokesketch-$STAMP.db"

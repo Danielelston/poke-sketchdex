@@ -4,8 +4,6 @@ A self-hosted Discord bot that posts a **daily Pokémon sketch challenge** — p
 
 Multi-guild by design; runs comfortably on a tiny LXC on Proxmox.
 
-Design notes are maintained separately.
-
 ## Features
 
 - **Daily post** at a per-guild configurable time + timezone, pinging a `@Sketchers` role.
@@ -83,6 +81,15 @@ For instant slash-command registration during development, set `POKESKETCH_DEV_G
 ## Self-hosting on Proxmox
 
 Designed to run as a lightweight, outbound-only `systemd` service in an unprivileged Debian 12 LXC. See [`deploy/`](deploy/) for the systemd unit, a provisioning script, and the nightly DB backup + daily health-check timers. The SQLite database in `data/` is the entire bot state — back it up before every deploy (`cp data/pokesketch.db data/pokesketch.db.pre-deploy-bak`) and include the LXC in your vzdump job. Cached reference art (`data/images_cache/`) and caught-sketch images (`data/party_cache/`) live alongside it.
+
+The backup timer always keeps local SQLite snapshots. For off-host copies, copy
+[`deploy/pokesketch-backup.env.example`](deploy/pokesketch-backup.env.example) to
+`/etc/pokesketch-backup.env` on the host, set your own `BACKUP_REMOTE_DEST` and
+optional `BACKUP_SSH_KEY`, create the remote directory, and verify the SSH host
+key. Keep the filled-in config outside the repo, readable only by root, and
+reload the installed systemd unit (`systemctl daemon-reload`). Without this
+configuration the timer **does not send backups off-host**; verify your remote
+backup after updating an existing deployment.
 
 ### Deploying the player-registration feature
 
