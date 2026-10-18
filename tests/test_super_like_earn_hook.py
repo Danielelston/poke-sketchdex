@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
-from datetime import date
+from datetime import UTC, date, datetime
 
 from pokesketch import db, pokebox
 from pokesketch.cogs.submissions import Submissions
@@ -21,6 +21,11 @@ from pokesketch.cogs.submissions import Submissions
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def _today() -> date:
+    """Today in UTC -- the default guild timezone, so fixtures stay inside the grace window."""
+    return datetime.now(UTC).date()
 
 
 def _fresh_db():
@@ -73,7 +78,8 @@ async def _ensure_guild(s, guild_id: int = 1) -> None:
         await s.flush()
 
 
-async def _make_daily(s, *, guild_id: int = 1, local_date=date(2026, 9, 26)) -> db.DailyPokemon:
+async def _make_daily(s, *, guild_id: int = 1, local_date: date | None = None) -> db.DailyPokemon:
+    local_date = local_date or _today()
     await _ensure_guild(s, guild_id)
     daily = db.DailyPokemon(guild_id=guild_id, local_date=local_date, dex_no=25, name="pikachu")
     s.add(daily)
@@ -81,7 +87,8 @@ async def _make_daily(s, *, guild_id: int = 1, local_date=date(2026, 9, 26)) -> 
     return daily
 
 
-async def _make_wild_encounter(s, *, guild_id: int = 1, local_date=date(2026, 9, 26)) -> db.WildEncounter:
+async def _make_wild_encounter(s, *, guild_id: int = 1, local_date: date | None = None) -> db.WildEncounter:
+    local_date = local_date or _today()
     await _ensure_guild(s, guild_id)
     vote = db.WeeklyVote(guild_id=guild_id, iso_week="2026-W39")
     s.add(vote)

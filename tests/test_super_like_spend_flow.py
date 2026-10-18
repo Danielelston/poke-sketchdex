@@ -29,6 +29,11 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _today() -> date:
+    """Today in UTC -- the default guild timezone, so fixtures stay inside the grace window."""
+    return datetime.now(UTC).date()
+
+
 def _fresh_db():
     tmp = tempfile.mkdtemp()
     db.init_engine(os.path.join(tmp, "test.db"))
@@ -42,8 +47,9 @@ async def _ensure_guild(s, guild_id: int = 1, *, grace_period_days: int = 7) -> 
 
 
 async def _make_daily_submission(
-    s, *, guild_id: int = 1, owner_id: int = 1, local_date=date(2026, 9, 26), grace_period_days: int = 7
+    s, *, guild_id: int = 1, owner_id: int = 1, local_date: date | None = None, grace_period_days: int = 7
 ) -> db.Submission:
+    local_date = local_date or _today()
     await _ensure_guild(s, guild_id, grace_period_days=grace_period_days)
     daily = db.DailyPokemon(guild_id=guild_id, local_date=local_date, dex_no=25, name="pikachu")
     s.add(daily)
@@ -55,8 +61,9 @@ async def _make_daily_submission(
 
 
 async def _make_wild_submission(
-    s, *, guild_id: int = 1, owner_id: int = 1, local_date=date(2026, 9, 26), grace_period_days: int = 7
+    s, *, guild_id: int = 1, owner_id: int = 1, local_date: date | None = None, grace_period_days: int = 7
 ) -> db.WildEncounterSubmission:
+    local_date = local_date or _today()
     await _ensure_guild(s, guild_id, grace_period_days=grace_period_days)
     vote = db.WeeklyVote(guild_id=guild_id, iso_week="2026-W39")
     s.add(vote)
