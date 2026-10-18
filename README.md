@@ -80,23 +80,53 @@ For instant slash-command registration during development, set `POKESKETCH_DEV_G
 
 ## Self-hosting on Proxmox
 
-Designed to run as a lightweight, outbound-only `systemd` service in an unprivileged Debian 12 LXC. See [`deploy/`](deploy/) for the systemd unit, a provisioning script, and the nightly DB backup + daily health-check timers. The SQLite database in `data/` is the entire bot state — back it up before every deploy (`cp data/pokesketch.db data/pokesketch.db.pre-deploy-bak`) and include the LXC in your vzdump job. Cached reference art (`data/images_cache/`) and caught-sketch images (`data/party_cache/`) live alongside it.
+Designed to run as a lightweight, outbound-only `systemd` service in an unprivileged Debian 12 LXC. See [`deploy/`](deploy/) for the systemd units, a provisioning script, and the nightly DB backup + daily health-check timers. The SQLite database in `data/` is the entire bot state — back it up before every deploy with `sqlite3 data/pokesketch.db ".backup 'data/pokesketch.db.pre-deploy-bak'"` (rather than copying a live DB file) and include the LXC in your vzdump job. Check the backup with `sqlite3 data/pokesketch.db.pre-deploy-bak 'PRAGMA integrity_check;'` and perform a restore test. Cached reference art (`data/images_cache/`) and caught-sketch images (`data/party_cache/`) live alongside it.
 
 The backup timer always keeps local SQLite snapshots. For off-host copies, copy
 [`deploy/pokesketch-backup.env.example`](deploy/pokesketch-backup.env.example) to
 `/etc/pokesketch-backup.env` on the host, set your own `BACKUP_REMOTE_DEST` and
 optional `BACKUP_SSH_KEY`, create the remote directory, and verify the SSH host
-key. Keep the filled-in config outside the repo, readable only by root, and
-reload the installed systemd unit (`systemctl daemon-reload`). Without this
-configuration the timer **does not send backups off-host**; verify your remote
-backup after updating an existing deployment.
+key for **root** (the backup service user). Set `BACKUP_REQUIRE_REMOTE=1` where
+off-host backups are mandatory so a missing destination fails the job. Keep the
+filled-in config outside the repo, readable only by root, and **install the
+updated `pokesketch-backup.service` file** before reloading systemd — a reload
+alone does not copy the unit. Without this configuration the timer does not
+send backups off-host. Run `systemctl start pokesketch-backup.service` and verify
+a fresh snapshot on the remote host and a test restore after updating an
+existing deployment.
+
+### Updating a checkout after the public-history rewrite
+
+`deploy/update-checkout.sh` performs only fast-forward updates. The one-time
+history rewrite makes an old checkout diverge; `git pull --ff-only` cannot
+upgrade it. Back up and integrity-check the live database first, and preserve
+`.env`, `data/`, and any ignored/untracked/local files. Review both tracked
+changes (`git -C /opt/pokesketch status --porcelain`) **and ignored files**
+(`git -C /opt/pokesketch ls-files --others --ignored --exclude-standard`),
+comparing their paths with `git -C /opt/pokesketch ls-tree -r --name-only
+origin/master`; `git reset --hard` can overwrite an ignored file if the target
+commit tracks that same path. Relocate any collisions first. Once you have
+confirmed there are no tracked changes or path collisions, deliberately
+realign the checkout:
+
+```bash
+git -C /opt/pokesketch fetch origin master
+git -C /opt/pokesketch reset --hard origin/master  # discards tracked local edits
+bash /opt/pokesketch/deploy/provision-lxc.sh
+```
+
+Configure the off-host backup environment file **before** running the updated
+provisioner, which installs all service/timer units and restarts the bot. Do not
+use `git clean`: it can delete local data and private configuration. Recreate
+old feature branches from rewritten branch tips rather than merging their old
+histories back into this checkout.
 
 ### Deploying the player-registration feature
 
 This feature adds one column to an existing live table. `db.create_all()` only creates missing
 *tables*, never new columns on a table that already has rows, so this one migration step is manual:
 
-1. **Back up the DB first:** `cp data/pokesketch.db data/pokesketch.db.pre-deploy-bak`
+1. **Back up the DB first:** `sqlite3 data/pokesketch.db ".backup 'data/pokesketch.db.pre-deploy-bak'"` and check it with `sqlite3 data/pokesketch.db.pre-deploy-bak 'PRAGMA integrity_check;'`
 2. Run exactly one statement against it: `ALTER TABLE users ADD COLUMN registered_at DATETIME`
 3. **Re-invite the bot** with an updated OAuth2 URL that includes `Manage Roles` (see
    [Discord application setup](#discord-application-setup) above) — a plain `systemctl restart` is

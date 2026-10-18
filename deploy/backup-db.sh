@@ -1,9 +1,15 @@
 #!/bin/bash
 # Nightly SQLite backup for PokeSketchDex — local snapshot and optional remote copy.
 set -euo pipefail
+umask 077
 DB=/opt/pokesketch/data/pokesketch.db
 DEST_LOCAL=/opt/pokesketch/data/backups
 STAMP=$(date +%Y%m%d-%H%M%S)
+
+if [ "${BACKUP_REQUIRE_REMOTE:-0}" = 1 ] && [ -z "${BACKUP_REMOTE_DEST:-}" ]; then
+    echo "BACKUP_REMOTE_DEST is required when BACKUP_REQUIRE_REMOTE=1" >&2
+    exit 1
+fi
 
 mkdir -p "$DEST_LOCAL"
 
